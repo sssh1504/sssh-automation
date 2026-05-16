@@ -6,6 +6,9 @@ main.py
     C:\\Python314\\python.exe main.py
 """
 
+import msvcrt
+import time
+
 from taipeion_login import login_taipeion
 
 # ── 功能清單 ──────────────────────────────────────────────────────────────────
@@ -14,6 +17,35 @@ from taipeion_login import login_taipeion
 FEATURES = [
     ("臺北市單一帳號認證平台 — 自然人憑證登入", login_taipeion),
 ]
+
+AUTO_SELECT = "1"   # 逾時後自動選擇的編號
+TIMEOUT     = 1     # 等待秒數
+
+
+# ── 工具函式 ──────────────────────────────────────────────────────────────────
+
+def timed_input(prompt, timeout=TIMEOUT, default=AUTO_SELECT):
+    """顯示提示並等待按鍵；超過 timeout 秒無輸入則回傳 default。"""
+    print(prompt, end="", flush=True)
+    start = time.time()
+    chars = []
+    while True:
+        if time.time() - start >= timeout:
+            print(f"\n（{timeout} 秒未操作，自動選擇：{default}）")
+            return default
+        if msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            if ch in ('\r', '\n'):      # Enter
+                print()
+                return "".join(chars) if chars else default
+            elif ch == '\x08':          # Backspace
+                if chars:
+                    chars.pop()
+                    print('\b \b', end="", flush=True)
+            elif ch.isprintable():
+                chars.append(ch)
+                print(ch, end="", flush=True)
+        time.sleep(0.05)
 
 
 # ── 主選單 ────────────────────────────────────────────────────────────────────
@@ -29,7 +61,9 @@ def show_menu():
 def main():
     while True:
         show_menu()
-        choice = input("請選擇功能編號：").strip()
+        choice = timed_input(
+            f"請選擇功能編號（{TIMEOUT} 秒後自動選 {AUTO_SELECT}）："
+        )
 
         if choice == "0":
             print("再見！")
