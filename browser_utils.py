@@ -1,9 +1,18 @@
 """
 browser_utils.py
-Chrome 視窗操作共用工具 — 供各自動化腳本 import 使用。
+Chrome 視窗操作共用工具庫。
 
-相依套件：
+提供以下四類功能，供自動化腳本 import 使用：
+  1. 視窗列舉  — 找出目前開啟的 Chrome 視窗（hwnd）
+  2. 視窗操作  — 最大化、置頂、取得座標、截圖
+  3. 滑鼠鍵盤  — 在視窗內點擊指定位置、輸入文字、按鍵
+  4. 高階工具  — 開啟新 Chrome 視窗並等待頁面載入、像素顏色搜尋
+
+相依套件（需先安裝）：
     C:\\Python314\\python.exe -m pip install pillow pyautogui
+
+注意：所有座標均為「螢幕絕對座標」（DPI 縮放 100% 假設），
+      若 Windows 顯示縮放非 100%，截圖與點擊位置可能偏移。
 """
 
 import ctypes
@@ -14,18 +23,18 @@ import time
 import pyautogui
 from PIL import ImageGrab
 
-pyautogui.FAILSAFE = False
+pyautogui.FAILSAFE = False  # 關閉「滑鼠移到角落中止」安全機制，避免自動化中途被打斷
 
-# ── Win32 設定 ────────────────────────────────────────────────────────────────
+# ── Win32 常數與初始化 ────────────────────────────────────────────────────────
 user32 = ctypes.windll.user32
 EnumWindowsProc = ctypes.WINFUNCTYPE(
     ctypes.c_bool, ctypes.c_int, ctypes.POINTER(ctypes.c_int)
 )
 
-SWP_NOMOVE     = 0x0002
-SWP_NOSIZE     = 0x0001
-HWND_TOPMOST   = -1
-HWND_NOTOPMOST = -2
+SWP_NOMOVE     = 0x0002   # SetWindowPos：不移動視窗位置
+SWP_NOSIZE     = 0x0001   # SetWindowPos：不改變視窗大小
+HWND_TOPMOST   = -1       # 設為永遠置頂
+HWND_NOTOPMOST = -2       # 取消永遠置頂（恢復正常層級）
 
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
@@ -33,7 +42,12 @@ CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 # ── 視窗列舉 ──────────────────────────────────────────────────────────────────
 
 def get_all_chrome_windows():
-    """回傳所有可見 Chrome 視窗的 hwnd 集合。"""
+    """
+    列舉目前所有可見的 Chrome 視窗。
+
+    回傳：
+        set[int]  包含所有 Chrome 視窗 hwnd 的集合；無視窗時回傳空集合。
+    """
     hwnds = set()
 
     def callback(hwnd, _):
@@ -50,8 +64,14 @@ def get_all_chrome_windows():
 
 def find_window_from(candidates, title_keywords):
     """
-    在給定 hwnd 集合中，找標題含任一 title_keywords 的視窗。
-    回傳 (hwnd, left, top, width, height)，找不到回傳 None。
+    在指定的 hwnd 集合中，找出標題含有任一關鍵字的視窗。
+
+    參數：
+        candidates      要搜尋的 hwnd 集合（通常來自 get_all_chrome_windows）
+        title_keywords  標題關鍵字列表，只要符合其中一個即算找到
+
+    回傳：
+        (hwnd, left, top, width, height)  視窗資訊；找不到回傳 None。
     """
     for hwnd in candidates:
         buf = ctypes.create_unicode_buffer(256)
@@ -67,7 +87,12 @@ def find_window_from(candidates, title_keywords):
 # ── 視窗操作 ──────────────────────────────────────────────────────────────────
 
 def maximize_and_focus(hwnd):
-    """最大化並置頂視窗，確保蓋過其他視窗。"""
+    """
+    最大化視窗並確保它出現在最上層。
+
+    流程：最大化 → 暫時置頂（確保蓋過其他視窗）→ 設為前景 → 取消置頂（恢復正常層級）。
+    中間等待 1.5 秒讓視窗完成動畫再繼續操作。
+    """
     user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
     user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
     user32.SetForegroundWindow(hwnd)
@@ -76,7 +101,12 @@ def maximize_and_focus(hwnd):
 
 
 def get_window_rect(hwnd):
-    """回傳視窗的 RECT（含 left, top, right, bottom）。"""
+    """
+    取得視窗在螢幕上的邊界矩形。
+
+    回傳：
+        ctypes.wintypes.RECT  含 left、top、right、bottom 四個屬性（螢幕像素座標）。
+    """
     r = ctypes.wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
     return r
@@ -84,8 +114,10 @@ def get_window_rect(hwnd):
 
 def grab_window(hwnd):
     """
-    截取視窗畫面。
-    回傳 (PIL Image, RECT)。
+    對指定視窗截圖。
+
+    回傳：
+        (PIL.Image, RECT)  截圖影像與視窗邊界；可用 img.save() 存檔或直接分析像素。
     """
     r = get_window_rect(hwnd)
     img = ImageGrab.grab(bbox=(r.left, r.top, r.right, r.bottom))
@@ -94,9 +126,17 @@ def grab_window(hwnd):
 
 def click_at(hwnd, offset_x, offset_y):
     """
-    在視窗內的相對座標點擊（自動置頂確保不被遮擋）。
-    offset_x, offset_y：相對於視窗左上角的偏移量（像素）。
-    回傳實際點擊的螢幕座標 (screen_x, screen_y)。
+    在視窗內的相對座標點擊滑鼠左鍵。
+
+    點擊前會暫時將視窗置頂，確保點擊不被其他視窗遮擋；點擊後恢復正常層級。
+
+    參數：
+        hwnd      目標視窗的 handle
+        offset_x  相對於視窗左上角的水平偏移（像素）
+        offset_y  相對於視窗左上角的垂直偏移（像素）
+
+    回傳：
+        (screen_x, screen_y)  實際點擊的螢幕絕對座標。
     """
     r = get_window_rect(hwnd)
     screen_x = r.left + offset_x
@@ -112,12 +152,23 @@ def click_at(hwnd, offset_x, offset_y):
 
 
 def type_text(text, interval=0.05):
-    """在目前焦點的輸入框輸入文字。"""
+    """
+    在目前焦點的輸入框逐字輸入文字。
+
+    參數：
+        text      要輸入的字串（僅支援 ASCII；中文需改用剪貼簿方式）
+        interval  每個字元之間的間隔秒數（預設 0.05 秒）
+    """
     pyautogui.typewrite(text, interval=interval)
 
 
 def press_key(key):
-    """按下單一按鍵，例如 'enter'、'tab'、'escape'。"""
+    """
+    按下單一鍵盤按鍵。
+
+    參數：
+        key  pyautogui 鍵名字串，例如 'enter'、'tab'、'escape'、'f5'。
+    """
     pyautogui.press(key)
 
 
@@ -125,15 +176,19 @@ def press_key(key):
 
 def launch_chrome_and_wait(profile, url, title_keywords, timeout=30):
     """
-    以指定 profile 開新 Chrome 視窗，等待頁面載入後回傳視窗資訊。
+    以指定 Chrome Profile 開啟新視窗，並等待目標頁面載入完成。
+
+    作法：記錄啟動前已存在的 Chrome 視窗，啟動後持續輪詢新出現的視窗，
+    直到找到標題符合 title_keywords 的視窗為止。
 
     參數：
-        profile        Chrome profile 目錄名稱，例如 "Profile 2"
+        profile        Chrome Profile 目錄名稱，例如 "Profile 2"
         url            要開啟的網址
-        title_keywords 頁面標題需含有的關鍵字列表
-        timeout        最多等待秒數（預設 30）
+        title_keywords 頁面標題需含有的關鍵字列表（符合任一即視為載入成功）
+        timeout        最多等待秒數（預設 30 秒）
 
-    回傳 (hwnd, left, top, width, height)，超時則回傳 None。
+    回傳：
+        (hwnd, left, top, width, height)  目標視窗資訊；超時或失敗回傳 None。
     """
     existing = get_all_chrome_windows()
     subprocess.Popen([
@@ -161,10 +216,14 @@ def launch_chrome_and_wait(profile, url, title_keywords, timeout=30):
 
 def find_color_pixels(img_strip, condition):
     """
-    在 PIL 圖像中找出符合條件的像素座標。
-    condition(r, g, b) -> bool
+    掃描 PIL 圖像，找出所有符合顏色條件的像素座標。
 
-    回傳 [(x, y), ...]。
+    參數：
+        img_strip  要掃描的 PIL Image（通常是從 grab_window 截取的局部區域）
+        condition  callable(r, g, b) -> bool，判斷像素是否符合條件
+
+    回傳：
+        list[(x, y)]  所有符合條件的像素座標清單；無符合時回傳空清單。
     """
     pixels = img_strip.load()
     nw, nh = img_strip.size
@@ -178,7 +237,15 @@ def find_color_pixels(img_strip, condition):
 
 
 def center_of(pts):
-    """回傳一組座標點的中心 (cx, cy)，清單為空時回傳 None。"""
+    """
+    計算一組像素座標的幾何中心。
+
+    參數：
+        pts  [(x, y), ...] 座標清單
+
+    回傳：
+        (cx, cy)  整數中心座標；pts 為空時回傳 None。
+    """
     if not pts:
         return None
     cx = int(sum(p[0] for p in pts) / len(pts))
@@ -188,15 +255,18 @@ def center_of(pts):
 
 def find_rightmost_cluster(img_strip, condition, min_pixels=15, gap=40):
     """
-    找出圖像中最右側的顏色像素群集中心。
+    在圖像中找出最右側的顏色像素群集，並回傳其中心座標。
+
+    用途：當畫面中有多個同色區塊時，取最右邊那個（例如定位最右側的按鈕）。
 
     參數：
-        img_strip   PIL Image
+        img_strip   要掃描的 PIL Image
         condition   (r, g, b) -> bool，像素篩選條件
-        min_pixels  群集最少像素數（過濾雜訊，預設 15）
-        gap         超過此 x 距離視為不同群集（預設 40px）
+        min_pixels  群集最少需包含的像素數，低於此值視為雜訊忽略（預設 15）
+        gap         水平距離超過此值（像素）的像素視為不同群集（預設 40）
 
-    回傳 (cx, cy) 相對於 img_strip 左上角，找不到回傳 None。
+    回傳：
+        (cx, cy)  最右側群集的中心座標（相對於 img_strip 左上角）；找不到回傳 None。
     """
     pts = find_color_pixels(img_strip, condition)
     if not pts:
