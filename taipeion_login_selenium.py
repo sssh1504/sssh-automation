@@ -111,10 +111,13 @@ def _js_click(driver, xpaths, label, timeout=4):
     return False
 
 
-def _wait_for_login_button(driver, max_retries=3, interval=2.0):
+def _wait_for_login_button(driver, max_retries=3, interval=5.0):
     """等讀卡機完成卡片偵測，「登入」按鈕真正可用。
     若頁面顯示「重新檢測」/「重新偵測卡片」（兩個獨立按鈕），
-    每輪都把兩個都點一次，直到「登入」按鈕出現，最多 max_retries 輪。"""
+    每輪都把兩個都點一次，**用 Selenium 原生 click（不是 JS 合成）**，
+    然後等 interval 秒給 HiCOS 完成卡片讀取。手動使用觀察值：
+    點一次「重新檢測」後 HiCOS 需要約 3-5 秒完成偵測，期間頁面看似沒變化。
+    """
     for attempt in range(1, max_retries + 1):
         # 看「登入」是否已出現
         for xp in LOGIN_BTN_XPATHS:
@@ -127,7 +130,7 @@ def _wait_for_login_button(driver, max_retries=3, interval=2.0):
             except Exception:
                 pass
 
-        # 沒「登入」→ 把兩個重試按鈕都點一次
+        # 沒「登入」→ 把兩個重試按鈕都點一次（用 Selenium 原生 click，不用 JS 合成）
         clicked_any = False
         for label in RECHECK_BUTTONS:
             xp = f"//*[normalize-space()='{label}']"
@@ -135,10 +138,16 @@ def _wait_for_login_button(driver, max_retries=3, interval=2.0):
                 els = driver.find_elements(By.XPATH, xp)
                 for el in els:
                     if el.is_displayed():
-                        driver.execute_script("arguments[0].click();", el)
-                        print(f"      [retry {attempt}] 點到「{label}」")
-                        clicked_any = True
-                        break
+                        try:
+                            el.click()
+                            print(f"      [retry {attempt}] 點到「{label}」（原生 click）")
+                            clicked_any = True
+                            break
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", el)
+                            print(f"      [retry {attempt}] 點到「{label}」（JS fallback）")
+                            clicked_any = True
+                            break
             except Exception:
                 pass
 
