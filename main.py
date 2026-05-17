@@ -27,9 +27,8 @@ def _force_close_all_chrome():
                 ["taskkill", "/F", "/IM", img],
                 capture_output=True, timeout=10,
             )
-        except Exception as e:
-            print(f"[警告] taskkill {img} 失敗：{e}")
-    print("[init] 已強制終止所有 chrome.exe / chromedriver.exe")
+        except Exception:
+            pass
 
 
 _force_close_all_chrome()
