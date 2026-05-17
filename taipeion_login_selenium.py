@@ -269,8 +269,8 @@ def login_taipeion_selenium():
     if not _js_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
         return False
 
-    # 等系統處理登入 + 跳轉（HiCOS 簽章 + server redirect 大約 2-3 秒）
-    time.sleep(3)
+    # 等系統處理登入 + 跳轉（HiCOS 簽章 + server redirect 實測需 4-5 秒）
+    time.sleep(5)
     final_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_state.png")
     try:
         driver.save_screenshot(final_state)
