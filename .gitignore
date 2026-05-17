@@ -15,3 +15,6 @@ __pycache__/
 
 # Selenium 測試 log
 selenium_login_test.log
+
+# 自然人憑證 PIN（嚴禁推上 GitHub）
+id.txt
