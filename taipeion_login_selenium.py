@@ -71,6 +71,25 @@ def _mark_profile_clean_exit():
         pass
 
 
+def _reset_crash_streak():
+    """重置 Local State 的 variations_crash_streak。Chrome 累積 5+ 次 crash 後會安全模式
+    拒絕啟動，每次 Stop-Process 強制殺 Chrome 都會讓這個值 +1。"""
+    local_state = os.path.join(USER_DATA_DIR, "Local State")
+    if not os.path.isfile(local_state):
+        return
+    try:
+        with open(local_state, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["variations_crash_streak"] = 0
+        stab = data.setdefault("user_experience_metrics", {}).setdefault("stability", {})
+        for k in ("crash_count", "system_crash_count", "incomplete_session_end_count"):
+            stab[k] = 0
+        with open(local_state, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
 def _js_click(driver, xpaths, label, timeout=4):
     """用 JS execute_script 點擊第一個符合的 XPath 元素（繞遮罩）。"""
     wait = WebDriverWait(driver, timeout)
@@ -144,6 +163,7 @@ def login_taipeion_selenium():
     回傳 True 表示已到 PIN 輸入畫面，等待使用者插卡 + 輸入 PIN。"""
     print(f"[1/5] 啟動 Chrome（Selenium 專用 profile：{USER_DATA_DIR}）...")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
+    _reset_crash_streak()
     if os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
         _mark_profile_clean_exit()
 
