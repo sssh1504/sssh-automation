@@ -51,14 +51,8 @@ PIN_INPUT_XPATHS = [
     "//input[@id='pin']",
     "//input[contains(@name, 'pin')]",
 ]
-RECHECK_XPATHS = [
-    "//*[normalize-space()='重新檢測']",
-    "//*[normalize-space()='重新偵測卡片']",
-    "//button[contains(., '重新檢測')]",
-    "//button[contains(., '重新偵測卡片')]",
-    "//a[contains(., '重新檢測')]",
-    "//a[contains(., '重新偵測卡片')]",
-]
+# 卡片偵測失敗時頁面會出現的兩個獨立按鈕（兩個都要點）
+RECHECK_BUTTONS = ["重新檢測", "重新偵測卡片"]
 
 # PIN 從 id.txt 讀。檔案不應該 commit（已在 .gitignore）。
 PIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "id.txt")
@@ -117,11 +111,10 @@ def _js_click(driver, xpaths, label, timeout=4):
     return False
 
 
-def _wait_for_login_button(driver, max_retries=8, interval=2.0):
+def _wait_for_login_button(driver, max_retries=3, interval=2.0):
     """等讀卡機完成卡片偵測，「登入」按鈕真正可用。
-    若頁面顯示「重新檢測 / 重新偵測卡片」（卡片或讀卡機尚未就位），
-    依序點擊這些按鈕直到「登入」按鈕出現，最多 max_retries 次。
-    回傳是否在重試上限內看到「登入」。"""
+    若頁面顯示「重新檢測」/「重新偵測卡片」（兩個獨立按鈕），
+    每輪都把兩個都點一次，直到「登入」按鈕出現，最多 max_retries 輪。"""
     for attempt in range(1, max_retries + 1):
         # 看「登入」是否已出現
         for xp in LOGIN_BTN_XPATHS:
@@ -134,27 +127,26 @@ def _wait_for_login_button(driver, max_retries=8, interval=2.0):
             except Exception:
                 pass
 
-        # 沒「登入」→ 試著點「重新檢測 / 重新偵測卡片」
-        clicked = False
-        for xp in RECHECK_XPATHS:
+        # 沒「登入」→ 把兩個重試按鈕都點一次
+        clicked_any = False
+        for label in RECHECK_BUTTONS:
+            xp = f"//*[normalize-space()='{label}']"
             try:
                 els = driver.find_elements(By.XPATH, xp)
                 for el in els:
                     if el.is_displayed():
                         driver.execute_script("arguments[0].click();", el)
-                        print(f"      [retry {attempt}] 點到 {xp}")
-                        clicked = True
+                        print(f"      [retry {attempt}] 點到「{label}」")
+                        clicked_any = True
                         break
-                if clicked:
-                    break
             except Exception:
                 pass
 
-        if not clicked:
-            print(f"      [retry {attempt}] 找不到登入或重新檢測按鈕，等 {interval}s")
+        if not clicked_any:
+            print(f"      [retry {attempt}] 找不到登入或重試按鈕，等 {interval}s")
         time.sleep(interval)
 
-    print(f"[WARN] 重試 {max_retries} 次後仍未看到『登入』按鈕")
+    print(f"[WARN] 重試 {max_retries} 輪後仍未看到『登入』按鈕")
     return False
 
 
