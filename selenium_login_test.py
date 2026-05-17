@@ -10,9 +10,13 @@ selenium_login_test.py
 
 本範例不處理（保留至第二階段再評估）：
   - AutoSelectCertificateForUrls 群組原則（讓憑證對話框自動選取）
-  - 使用既有 Chrome Profile 2（避免與已開啟視窗衝突）
   - 螢幕鎖定下的執行
   - 失敗重試 / 截圖儲存
+
+執行前必做：
+  ★ 關閉所有「1504@sssh.tp.edu.tw（Profile 2）」的 Chrome 視窗 ★
+  Chrome 同一 profile 不允許兩個程序同時開啟，否則會出現
+  "user data directory is already in use" 錯誤。
 
 執行方式：
     C:\\Python314\\python.exe -m pip install selenium
@@ -21,9 +25,10 @@ selenium_login_test.py
 執行後請觀察：
   A. 是否成功點到「自然人憑證」分頁（畫面切換）
   B. 是否成功點到「登入」按鈕
-  C. 是否跳出 Windows 憑證選擇對話框（若有讀卡機 + 卡片）
+  C. 是否跳出 Windows 憑證選擇對話框 / 密碼欄是否帶入儲存密碼
 """
 
+import os
 import sys
 import time
 
@@ -37,6 +42,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 URL = "https://login.gov.taipei/login.php"
+
+# 使用既有 Chrome Profile 2，繼承儲存的密碼 / 憑證設定 / 擴充功能
+USER_DATA_DIR = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+PROFILE_DIR = "Profile 2"
 
 # 嘗試多組 XPath，依序測試
 CERT_TAB_XPATHS = [
@@ -87,7 +96,15 @@ def dump_page_for_debug(driver):
 
 
 def main():
+    print(f"[0/4] 使用 Chrome Profile：{PROFILE_DIR}")
+    print(f"      路徑：{USER_DATA_DIR}")
+    if not os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
+        print(f"[FATAL] 找不到 profile 目錄：{os.path.join(USER_DATA_DIR, PROFILE_DIR)}")
+        return
+
     options = Options()
+    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+    options.add_argument(f"--profile-directory={PROFILE_DIR}")
     options.add_argument("--start-maximized")
     # 跑完不要關閉瀏覽器，方便人工觀察 / 接手登入
     options.add_experimental_option("detach", True)
@@ -98,7 +115,12 @@ def main():
     try:
         driver = webdriver.Chrome(options=options)
     except WebDriverException as e:
-        print(f"[FATAL] 無法啟動 Chrome：{e}")
+        msg = str(e)
+        if "user data directory is already in use" in msg.lower() or "session not created" in msg.lower():
+            print("[FATAL] Chrome 該 profile 正在使用中。")
+            print("        請先關閉所有 1504@sssh.tp.edu.tw（Profile 2）的 Chrome 視窗再執行。")
+        else:
+            print(f"[FATAL] 無法啟動 Chrome：{e}")
         return
 
     try:
