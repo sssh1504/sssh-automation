@@ -176,7 +176,7 @@ def _read_pin():
         return None
 
 
-def _fill_pin(driver, pin, timeout=10):
+def _fill_pin(driver, pin, timeout=3):
     """找到 PIN 輸入框並填入。回傳是否成功。"""
     wait = WebDriverWait(driver, timeout)
     for xp in PIN_INPUT_XPATHS:
@@ -197,12 +197,12 @@ def _fill_pin(driver, pin, timeout=10):
 
 
 def _click_chrome_allow_button():
-    """點擊 Chrome 站台權限對話框「允許」按鈕（固定螢幕座標）。
-    對話框錨點為 URL bar 左下，按鈕中心約在 (322, 197)，實測在不同解析度穩定。
-    Chrome 授權後會記在 profile 內，下次同 origin 不再跳，所以這個動作是冪等的。"""
-    time.sleep(1.5)
+    """點擊 Chrome 站台權限對話框「允許」按鈕（固定螢幕座標 (322, 197)）。
+    對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳，
+    所以這個動作是冪等的（沒對話框時點空地也無傷）。"""
+    time.sleep(0.5)
     try:
-        pyautogui.moveTo(322, 197, duration=0.2)
+        pyautogui.moveTo(322, 197, duration=0.1)
         pyautogui.click()
     except Exception as e:
         print(f"      pyautogui 點擊失敗：{e}")
@@ -251,10 +251,7 @@ def login_taipeion_selenium():
     print("[4/6] 點選『自然人憑證』分頁...")
     if not _js_click(driver, CERT_TAB_XPATHS, "自然人憑證分頁"):
         return False
-    time.sleep(1.5)
-
-    # 切到分頁後 HiCOS 元件可能再要求一次權限，保險再點一次
-    _click_chrome_allow_button()
+    time.sleep(0.3)
 
     # 卡片/讀卡機未就位時頁面顯示「重新檢測 / 重新偵測卡片」，需重複點擊直到「登入」出現
     print("[4.5/6] 等讀卡機完成卡片偵測，必要時點重新檢測...")
@@ -272,8 +269,8 @@ def login_taipeion_selenium():
     if not _js_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
         return False
 
-    # 等系統處理登入後再記錄最終狀態（包含可能的跳轉）
-    time.sleep(5)
+    # 等系統處理登入 + 跳轉（HiCOS 簽章 + server redirect 大約 2-3 秒）
+    time.sleep(3)
     final_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_state.png")
     try:
         driver.save_screenshot(final_state)
