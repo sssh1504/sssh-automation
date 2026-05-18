@@ -225,10 +225,56 @@ def _fill_pin(driver, pin, timeout=3):
     return False
 
 
+def _bring_chrome_to_foreground():
+    """把 Chrome 視窗拉到最上層，否則 pyautogui 點到的可能是 VSCode/別的視窗。
+
+    用 EnumWindows + 比對 class name 'Chrome_WidgetWin_1' 找到第一個可見的 Chrome
+    視窗，再用 SetForegroundWindow 拉到前面。為繞過 Windows 對 SetForegroundWindow
+    的「只有前景程序能設定前景」限制，先 keyDown/keyUp 一次 Alt 鍵讓本程序短暫取得
+    前景權限（這是常見 hack，不影響功能）。回傳是否成功。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        chrome_hwnd = [0]
+
+        def _cb(hwnd, _):
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, buf, 256)
+            if buf.value == "Chrome_WidgetWin_1" and user32.IsWindowVisible(hwnd):
+                chrome_hwnd[0] = hwnd
+                return False
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
+        if not chrome_hwnd[0]:
+            print("      [WARN] 找不到 Chrome 視窗，pyautogui 點擊可能落在別處")
+            return False
+
+        # SetForegroundWindow 在非前景程序呼叫會失敗，先按 Alt 取得權限
+        pyautogui.keyDown("alt")
+        pyautogui.keyUp("alt")
+        # SW_RESTORE = 9：若 Chrome 被最小化先還原
+        user32.ShowWindow(chrome_hwnd[0], 9)
+        user32.SetForegroundWindow(chrome_hwnd[0])
+        time.sleep(0.3)
+        return True
+    except Exception as e:
+        print(f"      [WARN] 拉 Chrome 到前景失敗：{e}")
+        return False
+
+
 def _click_chrome_allow_button():
     """點擊 Chrome 站台權限對話框「允許」按鈕（固定螢幕座標 (322, 197)）。
     對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳，
-    所以這個動作是冪等的（沒對話框時點空地也無傷）。"""
+    所以這個動作是冪等的（沒對話框時點空地也無傷）。
+
+    先把 Chrome 拉到最上層（_bring_chrome_to_foreground），否則 pyautogui 在
+    click_document 階段（Chrome 已失焦）會把點擊送到 VSCode/PowerShell 視窗。
+    """
+    _bring_chrome_to_foreground()
     time.sleep(0.5)
     try:
         pyautogui.moveTo(322, 197, duration=0.1)
@@ -251,6 +297,12 @@ def login_taipeion_selenium(return_driver=False):
         _mark_profile_clean_exit()
 
     options = Options()
+    # page_load_strategy='eager'：等 DOMContentLoaded 就 return，不等 onload。
+    # 必要：點公文方塊後 edoc 新分頁會跳 Chrome 站台權限對話框，會讓頁面 onload
+    # 永遠不觸發；預設 strategy='normal' 下任何 driver.xxx 指令（window_handles、
+    # current_url 等）都會卡在 pending pageload 等到 onload 才返回，整個 driver
+    # 鎖死。eager 只等 DOMContentLoaded，不受對話框影響。
+    options.page_load_strategy = "eager"
     options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
     options.add_argument(f"--profile-directory={PROFILE_DIR}")
     options.add_argument("--start-maximized")
@@ -264,6 +316,9 @@ def login_taipeion_selenium(return_driver=False):
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
+    # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
+    # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
+    options.set_capability("unhandledPromptBehavior", "accept")
 
     try:
         driver = webdriver.Chrome(options=options)

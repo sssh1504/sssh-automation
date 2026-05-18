@@ -104,21 +104,50 @@ def _get_document_count(driver, timeout=10):
 
 
 def _click_document_card(driver, timeout=8):
-    """點『公文(學校)』方塊（純點擊動作，不檢查數字）。回傳是否點到。"""
+    """點『公文(學校)』方塊：取 <a> 的 href 後用 driver.get 同分頁導航。
+
+    為何不直接 .click() / execute_script click()：實測那會觸發 JS window.open
+    開新分頁，而 chromedriver 對 JS 觸發的新分頁有 bug——之後任何 W3C window
+    端點（window_handles / switch_to.window）都會永遠不返回（read timeout=120s）。
+    改成抓 href 後 driver.get(href) 在同分頁導航，整個 W3C window bug 繞掉。
+    若元素沒有 href（純 JS 處理），fallback 回原本 click 行為（並警告）。
+    回傳是否成功觸發導航。
+    """
     wait = WebDriverWait(driver, timeout)
     for xp in DOCUMENT_XPATHS:
+        # 先找元素並抓 href（這部分的 TimeoutException 才是「找不到元素」）
         try:
             el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
             if not el.is_displayed():
                 continue
+            href = el.get_attribute("href")
+        except TimeoutException:
+            continue
+        except Exception as e:
+            print(f"      x  公文(學校) 方塊元素例外：{type(e).__name__}: {e}")
+            continue
+
+        if href:
+            print(f"      OK：找到 公文(學校) 方塊（XPath: {xp}），href={href[:80]}...")
+            # 同分頁導航。edoc 載入時會跳 Chrome 站台權限對話框擋住 DOMContentLoaded，
+            # eager strategy 也等不到，會在 page_load_timeout（預設 15s）後丟 TimeoutException。
+            # 這是預期行為——導航已經觸發，後面 click_document() 會點允許解鎖頁面，所以
+            # 把這個 timeout 視為成功，繼續走流程。
+            try:
+                driver.get(href)
+                print(f"      OK：同分頁導航至公文系統")
+            except TimeoutException:
+                print(f"      OK：導航已觸發，eager 載入被允許對話框擋住（預期）— 交給後續 click_document 點允許")
+            return True
+        # 沒 href 才 fallback click — 會踩 W3C window bug，但至少有作動
+        print(f"      [WARN] {xp} 元素無 href，fallback 用 JS click（可能會踩到 chromedriver 新分頁 bug）")
+        try:
             driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
             print(f"      OK：點到 公文(學校) 方塊（XPath: {xp}）")
             return True
-        except TimeoutException:
-            continue
         except Exception as e:
-            print(f"      x  公文(學校) 方塊點擊例外：{type(e).__name__}: {e}")
+            print(f"      x  公文(學校) 方塊 click 例外：{type(e).__name__}: {e}")
             continue
     print("[ERROR] 公文(學校) 方塊 全部 XPath 都失敗")
     return False
@@ -127,19 +156,31 @@ def _click_document_card(driver, timeout=8):
 def click_document(driver):
     """『公文(學校)』方塊點選之後的後續工作。
 
-    目前：等公文系統載入、若開新分頁切過去、印 URL/標題。
+    目前：等 edoc 載入 → 用 pyautogui 點 Chrome 站台權限「允許」按鈕 → 印 URL/標題。
     未來：在此函式內擴充後續流程（瀏覽未讀公文、批次處理等）。
+
+    流程設計：_click_document_card 已改成 driver.get(href) 同分頁導航，因此這裡
+    不需切窗。但 edoc.gov.taipei 載入時還是會跳 Chrome 站台權限對話框（要求存取
+    本地簽章元件），仍需用 pyautogui 點掉。
     """
-    # 點完後系統可能跳新分頁或同分頁導向；給 3 秒緩衝再判讀狀態
-    time.sleep(3)
+    # driver.get 已返回（page_load_strategy=eager 等到 DOMContentLoaded），給點時間
+    # 讓對話框出現
+    time.sleep(2)
+
+    # 點 Chrome 站台權限對話框「允許」。對話框錨點為 URL bar 左下；座標與登入頁
+    # 那顆相同，直接重用 _click_chrome_allow_button。授權後 Chrome 把同 origin
+    # 記在 profile 內，下次不再跳，動作冪等（沒對話框時點空地也無傷）。
+    print("[click_document] 點 Chrome 站台權限對話框「允許」按鈕（edoc 公文系統需要存取本地簽章元件）...")
+    from taipeion_login_selenium import _click_chrome_allow_button
+    _click_chrome_allow_button()
+
+    # 允許按掉後讓頁面收尾
+    time.sleep(1.5)
     try:
-        if len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-            print("[click_document] 已切換至新分頁")
         print(f"[click_document] 當前 URL：{driver.current_url}")
         print(f"[click_document] 當前標題：{driver.title}")
     except Exception as e:
-        print(f"[click_document] 讀狀態失敗：{e}")
+        print(f"[click_document] 讀狀態失敗：{type(e).__name__}: {e}")
 
     # TODO: 點選之後的後續工作在此擴充
     print("[完成] 公文後續工作流程結束。")
