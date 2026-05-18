@@ -45,7 +45,7 @@ _close_selenium_chrome_only()
 
 from taipeion_login import login_taipeion
 from taipeion_login_selenium import login_taipeion_selenium
-from click_document import click_document
+from click_document import click_document_card
 
 # ── 功能清單 ──────────────────────────────────────────────────────────────────
 # 每新增一列：(顯示名稱, 主函式, 登入後動作 or None)
@@ -56,7 +56,7 @@ from click_document import click_document
 #   python main.py 2      # 跑 FEATURES[1]（pyautogui 像素點擊版）
 
 FEATURES = [
-    ("臺北市單一帳號認證平台 — 自然人憑證登入 + 點公文（Selenium 版）", login_taipeion_selenium, click_document),
+    ("臺北市單一帳號認證平台 — 自然人憑證登入 + 點公文（Selenium 版）", login_taipeion_selenium, click_document_card),
     ("臺北市單一帳號認證平台 — 自然人憑證登入（pyautogui 像素版）", login_taipeion, None),
 ]
 
