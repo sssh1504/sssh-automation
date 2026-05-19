@@ -316,6 +316,12 @@ def _build_chrome_options():
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
+    # 剪貼簿權限預設「允許」(content_settings 層)，避免公文閱覽器分頁載入時跳
+    # 「請取已複製到剪貼簿的文字和圖片」對話框。1=allow, 2=block, 0=ask（預設）。
+    # CDP grant (_grant_clipboard_permission) 是 PermissionContext 層的雙保險。
+    options.add_experimental_option("prefs", {
+        "profile.default_content_setting_values.clipboard": 1,
+    })
     # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
     # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
     options.set_capability("unhandledPromptBehavior", "accept")
@@ -556,7 +562,7 @@ def _click_chrome_allow_button(driver=None):
     對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳。
 
     參數：
-        driver: Selenium WebDriver，用於辨識正確的 Selenium Chrome PID。若為 None
+        driver: Selenium WebDriver,用於辨識正確的 Selenium Chrome PID。若為 None
                 則 fallback 用 exe 名過濾（避免抓到 VSCode），但可能會抓到使用者
                 個人 Chrome 視窗。建議盡量傳入。
 

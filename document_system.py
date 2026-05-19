@@ -1130,8 +1130,6 @@ def pending_doc(driver):
         return False
 
     # 點公文後系統可能就地 frame 切到公文內容、或開新分頁、或彈 modal。
-    # 給足夠時間觀察，再 print 主文件狀態。driver.current_url 永遠是主文件 URL，
-    # 不受 frame switch 影響 — 若 frame 內容換了但主文件沒動，URL 不會變。
     time.sleep(3)
     try:
         print(f"[pending_doc] 點開後 URL：{driver.current_url}")
