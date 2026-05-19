@@ -455,12 +455,26 @@ def login_taipeion_selenium(return_driver=False):
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--restore-last-session=false")
+    # 關閉 Chrome Private Network Access (PNA) preflight 與相關阻擋：
+    # edoc.gov.taipei (公開來源) 會 fetch 本地 TCGServiSign 簽章元件
+    # (https://127.0.0.1:56420/56520/56620)。Chrome 從 94/119 起對「公開站台 → 私有 IP」
+    # 做 preflight CORS 並要求 profile 內預先授權；個人 Chrome Profile 2 早授權過，
+    # 全新 Selenium profile 沒授權，preflight 直接被擋 → 頁面顯示「簽章元件未啟動」。
+    # 關掉這幾個 feature 後 PNA 不再擋；只影響 fetch private network 的行為，不影響
+    # 一般網頁安全性。
+    options.add_argument(
+        "--disable-features=BlockInsecurePrivateNetworkRequests,"
+        "PrivateNetworkAccessRespectPreflightResults,"
+        "PrivateNetworkAccessSendPreflights"
+    )
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
     # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
     # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
     options.set_capability("unhandledPromptBehavior", "accept")
+    # 開啟瀏覽器 console / 網路日誌，下次出簽章元件、CORS、PNA 問題可直接看 log
+    options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
     try:
         driver = webdriver.Chrome(options=options)
