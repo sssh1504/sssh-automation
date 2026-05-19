@@ -1180,7 +1180,11 @@ def _standalone_open_chrome_at_edoc():
     from selenium import webdriver
     from selenium.common.exceptions import WebDriverException
 
-    from taipeion_login_selenium import _build_chrome_options, _close_selenium_chrome_only
+    from taipeion_login_selenium import (
+        _build_chrome_options,
+        _close_selenium_chrome_only,
+        _grant_clipboard_permission,
+    )
 
     print("[standalone] 預清理上一次 Selenium Chrome (若有)...")
     _close_selenium_chrome_only()
@@ -1194,6 +1198,8 @@ def _standalone_open_chrome_at_edoc():
     except WebDriverException as e:
         print(f"[FATAL] 無法啟動 Chrome：{str(e)[:300]}")
         return None
+
+    _grant_clipboard_permission(driver)
 
     print(f"[standalone 2/2] 導航到 {EDOC_HOME_URL}")
     try:

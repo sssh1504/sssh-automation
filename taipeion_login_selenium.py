@@ -324,6 +324,28 @@ def _build_chrome_options():
     return options
 
 
+def _grant_clipboard_permission(driver):
+    """用 CDP 給所有 origin grant clipboard 讀寫權限，避免分頁載入時跳「請取
+    已複製到剪貼簿的文字和圖片」對話框。
+
+    edoc 公文閱覽器（公文簽核 v1.0.344）開啟單筆公文後會 call navigator.clipboard，
+    Chrome 預設要使用者點允許。CDP Browser.grantPermissions 直接寫到 Permission
+    Context、繞過對話框，**本 driver session 內**所有 origin 都生效（不指定
+    origin 即全 origin）。每次新啟動 Chrome 都要重新 grant — CDP 狀態 per driver。
+
+    Chrome 啟動 flag (`--disable-features=...`) 對這類「需 user gesture」的權限
+    沒效（Permissions API 早就用 PermissionContext 管，不看 flag），所以 CDP 是
+    唯一無 UI 互動的解法。
+    """
+    try:
+        driver.execute_cdp_cmd("Browser.grantPermissions", {
+            "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"]
+        })
+        print("      OK：已 grant clipboard 權限（CDP，所有 origin）")
+    except Exception as e:
+        print(f"      [WARN] CDP grant clipboard 失敗：{type(e).__name__}: {e}")
+
+
 def _read_pin():
     """從 id.txt 讀 PIN，回傳字串；檔案不存在或空白時回傳 None。"""
     if not os.path.isfile(PIN_FILE):
@@ -583,6 +605,8 @@ def login_taipeion_selenium(return_driver=False):
     except WebDriverException as e:
         print(f"[FATAL] 無法啟動 Chrome：{str(e)[:300]}")
         return None if return_driver else False
+
+    _grant_clipboard_permission(driver)
 
     print(f"[2/6] 開啟 {URL}")
     try:
