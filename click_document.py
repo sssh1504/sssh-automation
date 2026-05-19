@@ -165,8 +165,8 @@ def click_document(driver):
     本地簽章元件），仍需用 pyautogui 點掉。
     """
     # driver.get 已返回（page_load_strategy=eager 等到 DOMContentLoaded），給點時間
-    # 讓對話框出現
-    time.sleep(2)
+    # 讓對話框出現。_click_chrome_allow_button 內部還有 0.5s anchor，所以這裡 1s 即可
+    time.sleep(1)
 
     # 點 Chrome 站台權限對話框「允許」。對話框錨點為 URL bar 左下；座標與登入頁
     # 那顆相同，直接重用 _click_chrome_allow_button。授權後 Chrome 把同 origin
@@ -178,8 +178,8 @@ def click_document(driver):
     # 不傳的話會誤抓 VSCode（Electron app，class 同為 Chrome_WidgetWin_1）。
     _click_chrome_allow_button(driver)
 
-    # 允許按掉後讓頁面收尾
-    time.sleep(1.5)
+    # 允許按掉後讓頁面收尾（後續只 print URL/title + dump console log，不需太久）
+    time.sleep(0.5)
     try:
         print(f"[click_document] 當前 URL：{driver.current_url}")
         print(f"[click_document] 當前標題：{driver.title}")

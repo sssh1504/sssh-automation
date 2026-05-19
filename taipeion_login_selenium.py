@@ -649,8 +649,29 @@ def login_taipeion_selenium(return_driver=False):
     if not _js_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
         return None if return_driver else False
 
-    # 等系統處理登入 + 跳轉（HiCOS 簽章 + server redirect 實測需 4-5 秒）
-    time.sleep(5)
+    # 等系統處理登入 + 跳轉。原本 sleep(5) 是 worst-case 固定保守等，改成「URL 變化
+    # + readyState complete」條件等待，常見情境秒進、server 慢時 fallback 等到 6s。
+    deadline = time.time() + 6
+    start_url = None
+    try:
+        start_url = driver.current_url
+    except Exception:
+        pass
+    while time.time() < deadline:
+        time.sleep(0.3)
+        try:
+            if start_url is not None and driver.current_url != start_url:
+                # URL 已變 → 再等 readyState complete (最多 2s)
+                for _ in range(20):
+                    try:
+                        if driver.execute_script("return document.readyState") == "complete":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                break
+        except Exception:
+            pass
     final_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_state.png")
     try:
         driver.save_screenshot(final_state)
