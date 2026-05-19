@@ -39,6 +39,16 @@ URGENT_MSG_XPATHS = [
     "//*[contains(normalize-space(), '催辦訊息')]",
 ]
 
+# 左側 sidebar「待簽收(N)」menu item 的 XPath 候選。文字格式為「待簽收(1)」，
+# 不像催辦訊息的「催辦訊息0」，數字外有括號。
+PENDING_SIGNOFF_XPATHS = [
+    "//a[contains(normalize-space(), '待簽收')]",
+    "//*[contains(normalize-space(), '待簽收')]/ancestor::a[1]",
+    "//*[contains(normalize-space(), '待簽收')]/ancestor::*[@role='link' or @role='menuitem' or @role='button'][1]",
+    "//*[contains(normalize-space(), '待簽收')]/ancestor::li[1]",
+    "//*[contains(normalize-space(), '待簽收')]",
+]
+
 
 def _get_urgent_message_count(driver, timeout=10):
     """讀「催辦訊息」badge 後面的數字。
@@ -126,6 +136,115 @@ def _get_urgent_message_count(driver, timeout=10):
     return -1
 
 
+def _get_pending_signoff_count(driver, timeout=10):
+    """讀左側 sidebar「待簽收(N)」的 N。格式有括號，例如「待簽收(1)」。
+
+    策略與 _get_urgent_message_count 同：先找含「待簽收」字串的最內層元素，再
+    1. regex 抓「待簽收\\s*(\\s*([\\d,]+)\\s*)」
+    2. fallback 在 sibling / parent 找純數字元素（少見，因為待簽收的數字幾乎
+       一定跟著 label 在同一個 text node）
+
+    回傳：
+        int >= 0 → 判讀成功
+        -1       → 找不到 label / 無法 parse（呼叫端保守不點）
+    """
+    wait = WebDriverWait(driver, timeout)
+    label_xpath = "//*[contains(normalize-space(), '待簽收')]"
+    try:
+        candidates = wait.until(EC.presence_of_all_elements_located((By.XPATH, label_xpath)))
+    except TimeoutException:
+        print("[WARN] 找不到「待簽收」label，無法判讀數字")
+        return -1
+
+    label_el = None
+    for el in candidates:
+        try:
+            if not el.is_displayed():
+                continue
+            inner = el.find_elements(By.XPATH, ".//*[contains(normalize-space(), '待簽收')]")
+            if not inner:
+                label_el = el
+                break
+        except Exception:
+            continue
+    if label_el is None:
+        label_el = candidates[0] if candidates else None
+    if label_el is None:
+        print("[WARN] 找不到可用的「待簽收」label 元素")
+        return -1
+
+    # 策略 1：regex 抓「待簽收(N)」括號內數字
+    try:
+        txt = (label_el.text or "").strip()
+        m = re.search(r'待簽收\s*\(\s*([\d,]+)\s*\)', txt)
+        if m:
+            n = int(m.group(1).replace(",", ""))
+            print(f"      OK：讀到待簽收數 = {n}（來源文字「{txt}」）")
+            return n
+    except Exception:
+        pass
+
+    # 策略 2：fallback 找鄰近純數字元素
+    relative_xpaths = [
+        "./following-sibling::*[1]",
+        "./parent::*/*[self::span or self::div or self::strong or self::b or self::p]",
+        "./parent::*/parent::*//*[self::span or self::div or self::strong or self::b or self::p]",
+    ]
+    seen_ids = set()
+    for rel_xp in relative_xpaths:
+        try:
+            els = label_el.find_elements(By.XPATH, rel_xp)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                el_id = el.id if hasattr(el, "id") else id(el)
+                if el_id in seen_ids:
+                    continue
+                seen_ids.add(el_id)
+                if not el.is_displayed():
+                    continue
+                txt = (el.text or "").strip()
+                if not txt or txt == "待簽收":
+                    continue
+                # 容許 "(1)" 或純 "1"
+                m = re.fullmatch(r"\(?\s*([\d,]+)\s*\)?", txt)
+                if m:
+                    n = int(m.group(1).replace(",", ""))
+                    print(f"      OK：讀到待簽收數 = {n}（來源文字「{txt}」）")
+                    return n
+            except Exception:
+                continue
+
+    print("[WARN] 找到「待簽收」label 但無法 parse 數字")
+    return -1
+
+
+def _click_pending_signoff(driver, timeout=10):
+    """點選左側 sidebar「待簽收」menu item。
+
+    回傳 True 表示點到，False 表示所有 XPath 都失敗。同 _click_urgent_message
+    套路，JS click 繞遮罩。
+    """
+    wait = WebDriverWait(driver, timeout)
+    for xp in PENDING_SIGNOFF_XPATHS:
+        try:
+            el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
+            if not el.is_displayed():
+                continue
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
+            print(f"      OK：點到「待簽收」（XPath: {xp}）")
+            return True
+        except TimeoutException:
+            continue
+        except Exception as e:
+            print(f"      x  「待簽收」XPath {xp} 例外：{type(e).__name__}: {e}")
+            continue
+    print("[ERROR] 「待簽收」全部 XPath 都失敗")
+    return False
+
+
 def _click_urgent_message(driver, timeout=10):
     """點選 edoc 公文首頁的「催辦訊息」badge。
 
@@ -157,11 +276,17 @@ def process_document_system(driver):
 
     流程：
         1. 確認 current_url 在 edoc.gov.taipei
-        2. 讀「催辦訊息」待辦數
-           - = 0：無待辦，跳過點擊，回 True（流程正常完成）
+        2. 讀右上「催辦訊息N」數字
            - > 0：點進催辦頁，sleep 2 印 URL/title 觀察
-           - 判讀失敗 (-1)：保守不點，回 False（同 click_document_card 策略）
-    回傳 True 表示流程跑完；False 表示前置檢查失敗或判讀失敗或點擊失敗。
+           - = 0：跳過
+           - 判讀失敗 (-1)：保守不點，印警告繼續
+        3. 讀左側 sidebar「待簽收(N)」數字（不管催辦結果如何都檢查 — sidebar
+           是常駐元件，導航到催辦頁之後仍然看得到）
+           - > 0：點進待簽收清單
+           - = 0：跳過
+           - 判讀失敗 (-1)：保守不點，印警告繼續
+    回傳 True 表示流程跑完（即使部分項目跳過或保守不點）；False 表示前置檢查失敗
+    或任一點擊行動失敗。
     """
     print("[document_system] 開始處理公文系統...")
 
@@ -175,30 +300,43 @@ def process_document_system(driver):
         print(f"[ERROR] 當前 URL 不在 edoc：{current}")
         return False
 
+    # ── 催辦訊息 ────────────────────────────────────────────────────────────
     print("[document_system] 讀「催辦訊息」待辦數...")
-    count = _get_urgent_message_count(driver)
-
-    if count == 0:
+    urgent_count = _get_urgent_message_count(driver)
+    if urgent_count < 0:
+        print("[document_system] 無法判讀催辦訊息數，保守不點，繼續下一步。")
+    elif urgent_count == 0:
         print("[document_system] 催辦訊息 = 0，無待辦催辦，跳過點擊。")
-        print("[完成] 公文系統處理流程結束。")
-        return True
-    if count < 0:
-        print("[document_system] 無法判讀催辦訊息數，保守不點，請手動處理。")
-        return False
+    else:
+        print(f"[document_system] 催辦訊息 = {urgent_count}，點選進入催辦頁...")
+        if not _click_urgent_message(driver):
+            return False
+        time.sleep(2)
+        try:
+            print(f"[document_system] 催辦頁 URL：{driver.current_url}")
+            print(f"[document_system] 催辦頁標題：{driver.title}")
+        except Exception as e:
+            print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
 
-    print(f"[document_system] 催辦訊息 = {count}，點選進入催辦頁...")
-    if not _click_urgent_message(driver):
-        return False
+    # ── 待簽收 ─────────────────────────────────────────────────────────────
+    print("[document_system] 讀左側 sidebar「待簽收」數...")
+    signoff_count = _get_pending_signoff_count(driver)
+    if signoff_count < 0:
+        print("[document_system] 無法判讀待簽收數，保守不點，繼續下一步。")
+    elif signoff_count == 0:
+        print("[document_system] 待簽收 = 0，無待簽收公文，跳過點擊。")
+    else:
+        print(f"[document_system] 待簽收 = {signoff_count}，點選進入待簽收清單...")
+        if not _click_pending_signoff(driver):
+            return False
+        time.sleep(2)
+        try:
+            print(f"[document_system] 待簽收頁 URL：{driver.current_url}")
+            print(f"[document_system] 待簽收頁標題：{driver.title}")
+        except Exception as e:
+            print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
 
-    # 等頁面反應，觀察點完去到哪
-    time.sleep(2)
-    try:
-        print(f"[document_system] 點完後 URL：{driver.current_url}")
-        print(f"[document_system] 點完後標題：{driver.title}")
-    except Exception as e:
-        print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
-
-    # TODO: 後續工作（讀催辦清單、逐筆點進公文等）在此擴充
+    # TODO: 後續工作（讀待簽收清單、逐筆點進公文簽收等）在此擴充
     print("[完成] 公文系統處理流程結束。")
     return True
 
