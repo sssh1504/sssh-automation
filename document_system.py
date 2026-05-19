@@ -266,50 +266,56 @@ def _click_pending_signoff(driver, timeout=10):
 
 
 def _try_check_checkbox(driver, el):
-    """確保單一 checkbox 為勾選狀態，回傳是否成功。
+    """確保單一 checkbox 為勾選狀態，回傳是否成功（是否被真實 click event 勾起來）。
 
-    已勾就不動（直接點會反選）；未勾就試三種 click strategy：
-      1. Selenium 原生 click
-      2. JS click（繞遮罩、繞 opacity:0）
-      3. JS 直接設 checked=true + dispatch change/click event（cover framework
-         binding 不認原生 click event 的情況，例如 Vue/React 客製 checkbox）
+    為何不直接 JS 設 `el.checked = true`：實測會說謊。Vue / React / Ant Design 等
+    客製 checkbox 的點擊 handler 綁在 wrapper（label / 外層 span / 外層 div），
+    不在隱藏的 <input> 上。直接設 input.checked 只更新 DOM property，框架的內部
+    state 完全沒變，畫面 ✓ 不出現，下一步點「簽收」會被當「沒選任何 row」拒絕。
+    is_selected() 仍然回 True 因為它讀的是 DOM .checked — 報告也跟著說謊。
 
-    刻意不檢查 is_displayed() — 很多客製 checkbox 把 input 設成 opacity:0 上面
-    疊自定義 UI，is_displayed 會回 false 但功能正常。
+    本函式只用「真實 click event」策略，依序試六種點擊目標：
+      1. input 元素 — Selenium 原生 click
+      2. input 元素 — JS click（繞 opacity:0 / 遮罩）
+      3. 最近的 <label> ancestor — JS click（HTML 規定 label click 會 forward 到 input）
+      4. parent[1] — JS click（cover wrapper 綁在直接父元素的客製 checkbox）
+      5. parent[2] — JS click
+      6. parent[3] — JS click
+
+    任一策略後 is_selected() 為 True 就回 True。全部失敗回 False（不再嘗試 JS 設
+    checked = true 蒙混過關）。
     """
     try:
         if el.is_selected():
             return True
     except Exception:
         return False
-    # 1. Selenium 原生 click
+
+    targets = [("input native", el, "native"), ("input JS", el, "js")]
     try:
-        el.click()
-        time.sleep(0.15)
-        if el.is_selected():
-            return True
+        label = el.find_element(By.XPATH, "./ancestor::label[1]")
+        targets.append(("label", label, "js"))
     except Exception:
         pass
-    # 2. JS click
-    try:
-        driver.execute_script("arguments[0].click();", el)
-        time.sleep(0.15)
-        if el.is_selected():
-            return True
-    except Exception:
-        pass
-    # 3. JS 設 checked + dispatch
-    try:
-        driver.execute_script(
-            "arguments[0].checked = true;"
-            "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));"
-            "arguments[0].dispatchEvent(new Event('click', {bubbles: true}));",
-            el)
-        time.sleep(0.15)
-        if el.is_selected():
-            return True
-    except Exception:
-        pass
+    for level in range(1, 4):
+        try:
+            anc = el.find_element(By.XPATH, "/".join([".."] * level))
+            targets.append((f"parent[{level}]", anc, "js"))
+        except Exception:
+            break
+
+    for name, target, method in targets:
+        try:
+            if method == "native":
+                target.click()
+            else:
+                driver.execute_script("arguments[0].click();", target)
+            time.sleep(0.2)
+            if el.is_selected():
+                print(f"        勾選成功 (策略: {name})")
+                return True
+        except Exception:
+            continue
     return False
 
 
@@ -358,11 +364,22 @@ def _check_select_all(driver, timeout=10):
             successful += 1
 
     if successful == 0:
-        print("[ERROR] 沒有任何 checkbox 能被勾選。診斷前 10 個元素：")
-        for i, el in enumerate(targets[:10]):
+        print("[ERROR] 沒有任何 checkbox 能被勾選。診斷前 5 個元素 + parent wrapper：")
+        for i, el in enumerate(targets[:5]):
             try:
-                outer = driver.execute_script("return arguments[0].outerHTML;", el) or ""
-                print(f"      [{i+1}] {outer[:300]}")
+                info = driver.execute_script("""
+                    var el = arguments[0];
+                    var p1 = el.parentElement;
+                    var p2 = p1 ? p1.parentElement : null;
+                    return {
+                        input: el.outerHTML,
+                        parent1: p1 ? p1.outerHTML : null,
+                        parent2: p2 ? p2.outerHTML : null,
+                    };
+                """, el) or {}
+                print(f"      [{i+1}] input  : {(info.get('input') or '')[:200]}")
+                print(f"           parent1: {(info.get('parent1') or '')[:300]}")
+                print(f"           parent2: {(info.get('parent2') or '')[:400]}")
             except Exception as e:
                 print(f"      [{i+1}] dump 失敗：{type(e).__name__}: {e}")
         return False
