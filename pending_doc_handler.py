@@ -702,6 +702,71 @@ def _extract_zip(zip_path, base_dir):
         return None
 
 
+# KdApp 打包的 zip 頂層子資料夾命名隨公文類型而異。實測:
+# - 來文公文 (一般受理):「來文」
+# - 自簽/簽稿:「公文」(根據使用者敘述;尚未直接觀察 repr)
+# 未來如遇到新名稱,加進此清單即可。
+_FLATTEN_CANDIDATE_NAMES = ("公文", "來文")
+
+
+def _flatten_subdir(parent_dir, names=_FLATTEN_CANDIDATE_NAMES):
+    """若 parent_dir 內存在任一 names 中的子資料夾,就把它內部檔案/資料夾搬到
+    parent_dir 下,搬完刪掉空殼。
+
+    names 接 str(單一名稱) 或 iterable of str(多候選名);用 iterable 時依序檢查,
+    遇到第一個命中的就處理並 return。
+
+    例:parent_dir = .../MWAA1156005008/,names = ('公文', '來文'),實際存在「來文」
+        .../MWAA1156005008/來文/<檔案A>
+        .../MWAA1156005008/來文/<子資料夾>/<檔案B>
+      → .../MWAA1156005008/<檔案A>
+        .../MWAA1156005008/<子資料夾>/<檔案B>
+        (來文/ 被刪掉)
+
+    回 True 表示有 flatten;False 表示候選名都不存在(視為 no-op,印 INFO 列出實
+    際看到的子資料夾名以便將來擴充清單)或處理失敗。
+    """
+    if isinstance(names, str):
+        names = (names,)
+
+    sub_path = None
+    for n in names:
+        p = os.path.join(parent_dir, n)
+        if os.path.isdir(p):
+            sub_path = p
+            break
+
+    if sub_path is None:
+        try:
+            actual = [d for d in os.listdir(parent_dir)
+                      if os.path.isdir(os.path.join(parent_dir, d))]
+        except OSError:
+            actual = []
+        print(f"      [INFO] flatten 候選 {names} 都不存在於 {parent_dir},"
+              f"實際子資料夾 = {actual}(若有想 flatten 的請加進 _FLATTEN_CANDIDATE_NAMES)")
+        return False
+
+    print(f"      flatten {sub_path} → {parent_dir}")
+    for item in os.listdir(sub_path):
+        src = os.path.join(sub_path, item)
+        dst = os.path.join(parent_dir, item)
+        if os.path.exists(dst):
+            print(f"      [WARN] 目標已存在,保留原檔案位置不搬:{dst}")
+            continue
+        try:
+            os.rename(src, dst)
+        except OSError as e:
+            print(f"      [WARN] 搬 {src} → {dst} 失敗:{type(e).__name__}: {e}")
+
+    try:
+        os.rmdir(sub_path)
+        print(f"      OK:flatten 完成,已刪空殼 {sub_path}")
+        return True
+    except OSError as e:
+        print(f"      [WARN] 刪 {sub_path} 失敗(可能還有檔案殘留):{e}")
+        return False
+
+
 def _download_and_extract(driver):
     """公文閱覽器:點「下載」按鈕、下載到 DOWNLOAD_DIR、若為 zip 解到子目錄。
 
@@ -743,9 +808,13 @@ def _download_and_extract(driver):
     print("[pending_doc_handler] 解壓縮...")
     extract_dir = _extract_zip(new_path, DOWNLOAD_DIR)
 
-    # 解壓縮成功 → 刪 zip 原檔 (節省空間,解壓後的目錄已是完整內容)。
-    # 解壓失敗保留 zip 供事後檢查。
     if extract_dir is not None:
+        # 解壓後若 zip 內頂層只是個外殼資料夾 (例如「公文」/「來文」,隨公文類型異),
+        # flatten 上來讓使用者直接看到內容。候選名清單在 _FLATTEN_CANDIDATE_NAMES。
+        _flatten_subdir(extract_dir)
+
+        # 解壓縮成功 → 刪 zip 原檔 (節省空間,解壓後的目錄已是完整內容)。
+        # 解壓失敗保留 zip 供事後檢查。
         try:
             os.remove(new_path)
             print(f"      OK:已刪除 zip 原檔 {new_path}")
