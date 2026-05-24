@@ -17,6 +17,23 @@ _SUGGESTED_RE = re.compile(
 _EXAMPLES_RE = re.compile(r"^#\s*cited_examples:[ \t]*(.*)$", re.MULTILINE)
 _SKIP_RE = re.compile(r"(?:<!--\s*)?SKIP\s*:?\s*(.*?)(?:\s*-->)?\s*$", re.DOTALL)
 
+_STRIP_LINE_RES = [
+    re.compile(r"^#\s*suggested_action:.*$", re.MULTILINE),
+    re.compile(r"^#\s*cited_examples:.*$", re.MULTILINE),
+]
+
+
+def strip_training_artifacts(md_text: str) -> str:
+    """組 prompt 前先把 training data 內的 # suggested_action: 與 # cited_examples: 行
+    過濾掉,只留 # action: 與公文內文。避免 LLM 把舊建議當金標。
+    """
+    result = md_text
+    for pat in _STRIP_LINE_RES:
+        result = pat.sub("", result)
+    # 連續多個空行壓成單一空行
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result
+
 
 def parse_response(raw: str) -> dict:
     """解析 LLM 回應。三種可能:
