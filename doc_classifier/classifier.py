@@ -4,7 +4,6 @@
 Python 只負責 I/O。
 """
 import re
-import sys
 from pathlib import Path
 
 _BASE_DIR = Path(__file__).parent.resolve()
@@ -27,7 +26,7 @@ def parse_response(raw: str) -> dict:
     """
     raw = (raw or "").strip()
 
-    if raw.lstrip().startswith("<!-- SKIP") or raw.lstrip().startswith("SKIP"):
+    if _SKIP_RE.match(raw.lstrip()):
         m = _SKIP_RE.search(raw)
         reason = m.group(1).strip() if m else ""
         return {"status": "skip", "reason": reason}

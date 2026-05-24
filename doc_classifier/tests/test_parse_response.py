@@ -63,3 +63,28 @@ def test_parse_examples_empty_string():
     result = parse_response(raw)
     assert result["status"] == "ok"
     assert result["examples"] == []
+
+
+def test_parse_skip_no_space_after_html_comment():
+    """`<!--SKIP:` (無空格) 也要被識別為 SKIP,不能 fall through 到 error。"""
+    from doc_classifier.classifier import parse_response
+    raw = "<!--SKIP: training_data 為空-->"
+    result = parse_response(raw)
+    assert result["status"] == "skip"
+
+
+def test_parse_examples_space_separated_kept_as_single_string():
+    """document current behavior:LLM 若用空格分隔 examples (違反 spec),
+    目前 split(',') 會把它當單一字串。這是已知行為,不修;classifier.md
+    規格明示 comma-separated,LLM 應遵守。
+    """
+    from doc_classifier.classifier import parse_response
+    raw = (
+        "# suggested_action: 公告 (信心:高)\n"
+        "# cited_examples: MW001 MW005\n"
+        "reasoning here\n"
+    )
+    result = parse_response(raw)
+    assert result["status"] == "ok"
+    # 空格分隔被當單一字串 — document current behavior
+    assert result["examples"] == ["MW001 MW005"]
