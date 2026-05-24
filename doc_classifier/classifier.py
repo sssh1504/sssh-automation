@@ -166,6 +166,13 @@ def _call_llm(prompt_text: str) -> str | None:
 
 _SUGGESTED_HEADER_RE = re.compile(r"^#\s*suggested_action:", re.MULTILINE)
 
+# 整段 classifier 輸出區塊:從 `# suggested_action:` 開始,直到第一個空行或文件末尾為止。
+# force/重跑時用此 regex 整段剝除(含 reasoning),避免多次執行累積舊內容。
+_CLASSIFIER_BLOCK_RE = re.compile(
+    r"^#\s*suggested_action:.*?(?:\n\s*\n|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
+
 
 def _load_examples(training_root: Path) -> dict[str, str]:
     """讀 training_root 下所有 *.md,strip artifacts 後回 {檔名: 內容}。"""
@@ -187,11 +194,14 @@ def _find_target_summary(mw_dir: Path) -> Path:
 
 def _write_back(target_md: Path, action: str, confidence: str,
                 examples: list[str], reasoning: str) -> None:
-    """把 LLM 結果寫回原 .md 開頭。先 strip 舊的 suggested_action / cited_examples 行
-    (force 模式或重跑時用到),再 prepend 新建議三行 + 原內文。
+    """把 LLM 結果寫回原 .md 開頭。
+
+    force 模式或重跑時,會先把舊的 classifier 輸出整段(含 reasoning) 剝掉,
+    再 prepend 新建議。不依賴 strip_training_artifacts ── 它只刪 header 兩行,
+    對 _write_back 寫回的格式(含 reasoning 段)不夠用。
     """
     original = target_md.read_text(encoding="utf-8")
-    stripped = strip_training_artifacts(original).lstrip("\n")
+    stripped = _CLASSIFIER_BLOCK_RE.sub("", original, count=1).lstrip("\n")
     header = (
         f"# suggested_action: {action} (信心:{confidence})\n"
         f"# cited_examples: {', '.join(examples)}\n"
@@ -321,34 +331,41 @@ def main():
 
     do_sync = not args.no_sync
 
-    if args.mw_dir:
-        result = run_one(
-            mw_dir=Path(args.mw_dir),
-            force=args.force,
-            do_sync=do_sync,
-        )
-        print(f"[classifier] {Path(args.mw_dir).name} → {result['status']}")
-        return
+    try:
+        if args.mw_dir:
+            result = run_one(
+                mw_dir=Path(args.mw_dir),
+                force=args.force,
+                do_sync=do_sync,
+            )
+            print(f"[classifier] {Path(args.mw_dir).name} → {result['status']}")
+            return
 
-    doc_download = _BASE_DIR.parent / "document_download"
-    if not doc_download.is_dir():
-        print(f"[ERROR] {doc_download} 不存在")
+        doc_download = _BASE_DIR.parent / "document_download"
+        if not doc_download.is_dir():
+            print(f"[ERROR] {doc_download} 不存在")
+            sys.exit(1)
+        mw_dirs = sorted(d for d in doc_download.iterdir()
+                         if d.is_dir() and d.name.startswith("MW"))
+        if not mw_dirs:
+            print(f"[INFO] {doc_download} 內沒有 MW* 子目錄")
+            return
+
+        if do_sync:
+            from doc_classifier import collect_training
+            stats = collect_training.sync()
+            print(f"[sync] added={stats['added']} updated={stats['updated']} "
+                  f"orphan_kept={stats['orphan_kept']}")
+
+        for d in mw_dirs:
+            try:
+                result = classify_dir(mw_dir=d, force=args.force)
+                print(f"[classifier] {d.name} → {result['status']}")
+            except FileNotFoundError as e:
+                print(f"[WARN] {d.name} 跳過:{e}")
+    except (FileNotFoundError, ValueError) as e:
+        print(f"[ERROR] {e}")
         sys.exit(1)
-    mw_dirs = sorted(d for d in doc_download.iterdir()
-                     if d.is_dir() and d.name.startswith("MW"))
-    if not mw_dirs:
-        print(f"[INFO] {doc_download} 內沒有 MW* 子目錄")
-        return
-
-    if do_sync:
-        from doc_classifier import collect_training
-        stats = collect_training.sync()
-        print(f"[sync] added={stats['added']} updated={stats['updated']} "
-              f"orphan_kept={stats['orphan_kept']}")
-
-    for d in mw_dirs:
-        result = classify_dir(mw_dir=d, force=args.force)
-        print(f"[classifier] {d.name} → {result['status']}")
 
 
 if __name__ == "__main__":

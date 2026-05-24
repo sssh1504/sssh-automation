@@ -201,3 +201,54 @@ def test_classify_dir_llm_backend_unavailable(stage, monkeypatch):
 
     assert result["status"] == "llm_unavailable"
     assert "LLM_UNAVAILABLE" in stage["runs_log"].read_text(encoding="utf-8")
+
+
+def test_classify_dir_force_does_not_accumulate_reasoning(stage, monkeypatch):
+    """force=True 重跑兩次,target_md 不該累積舊的 reasoning 文字。"""
+    from doc_classifier import classifier
+
+    # 第一次 LLM 回 reasoning_A
+    monkeypatch.setattr(
+        classifier, "_call_llm",
+        lambda p: (
+            "# suggested_action: 公告 (信心:高)\n"
+            "# cited_examples: 1140001\n"
+            "REASONING_FIRST_RUN_ABC\n"
+        ),
+    )
+    classifier.classify_dir(
+        mw_dir=stage["mw_dir"],
+        actions_yaml=stage["actions_yaml"],
+        spec_md=stage["spec_md"],
+        training_root=stage["training"],
+        runs_log=stage["runs_log"],
+        force=True,
+    )
+
+    # 第二次 LLM 回 reasoning_B
+    monkeypatch.setattr(
+        classifier, "_call_llm",
+        lambda p: (
+            "# suggested_action: 存查 (信心:中)\n"
+            "# cited_examples: 1140001\n"
+            "REASONING_SECOND_RUN_XYZ\n"
+        ),
+    )
+    classifier.classify_dir(
+        mw_dir=stage["mw_dir"],
+        actions_yaml=stage["actions_yaml"],
+        spec_md=stage["spec_md"],
+        training_root=stage["training"],
+        runs_log=stage["runs_log"],
+        force=True,
+    )
+
+    text = stage["target_md"].read_text(encoding="utf-8")
+    # 第二次的 reasoning 在
+    assert "REASONING_SECOND_RUN_XYZ" in text
+    # 第一次的 reasoning 已被剝掉
+    assert "REASONING_FIRST_RUN_ABC" not in text
+    # 原公文內容仍在
+    assert "校園資安宣導活動" in text
+    # 仍然只有一個 # suggested_action: 行
+    assert text.count("# suggested_action:") == 1

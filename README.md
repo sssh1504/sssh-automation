@@ -48,12 +48,13 @@ run.log                           — 主程式 stdout/stderr 落地 (每行 ISO
 ### 安裝相依套件
 
 ```powershell
-C:\Python314\python.exe -m pip install pillow pyautogui selenium pywin32
+C:\Python314\python.exe -m pip install pillow pyautogui selenium pywin32 pyyaml
 ```
 
 - `pillow` / `pyautogui`:備援像素版登入 (FEATURES[1]) 用
 - `selenium`:主力 DOM 版登入 + 公文系統流程
 - `pywin32`:公文閱覽器下載 zip 時,接管 KdApp 的「匯出公文資料」對話框 (Java Swing JFileChooser)
+- `pyyaml`:doc_classifier 讀 actions.yaml 動作清單
 
 Selenium Manager 會自動下載匹配的 ChromeDriver,不需手動安裝。
 
