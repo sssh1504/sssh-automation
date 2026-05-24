@@ -4,6 +4,7 @@
 Python 只負責 I/O。
 """
 import re
+import yaml
 from pathlib import Path
 
 _BASE_DIR = Path(__file__).parent.resolve()
@@ -83,3 +84,56 @@ def parse_response(raw: str) -> dict:
         "examples": examples,
         "reasoning": reasoning,
     }
+
+
+def load_actions(yaml_path: Path = None) -> list[str]:
+    """讀 actions.yaml,回動作清單 list。空清單或缺檔皆視為錯誤。"""
+    path = Path(yaml_path) if yaml_path else ACTIONS_YAML
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到 actions.yaml:{path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    actions = data.get("actions") or []
+    if not actions:
+        raise ValueError(f"actions.yaml 沒有任何動作清單:{path}")
+    return [str(a) for a in actions]
+
+
+def build_prompt(
+    spec_text: str,
+    actions: list[str],
+    examples: dict[str, str],
+    target_name: str,
+    target_text: str,
+) -> str:
+    """組 prompt:規格 + 動作清單 + 歷史範例 + 待分類公文。
+
+    Args:
+        spec_text: classifier.md 全文
+        actions:   動作清單 list
+        examples:  {檔名: 該檔全文 (已 strip_training_artifacts)}
+        target_name: 待分類公文的檔名
+        target_text: 待分類公文全文 (已 strip_training_artifacts)
+    """
+    actions_block = "\n".join(f"- {a}" for a in actions)
+
+    if examples:
+        ex_sections = [f"#### {name}\n\n{text}" for name, text in examples.items()]
+        examples_block = "\n\n---\n\n".join(ex_sections)
+    else:
+        examples_block = "(無歷史範例)"
+
+    return (
+        "你的任務:依「規格」對給定的公文做處置動作分類。\n\n"
+        "=== 規格 (classifier.md 全文) ===\n\n"
+        f"{spec_text}\n\n"
+        "=== 動作清單 (actions.yaml,本次允許值) ===\n\n"
+        f"{actions_block}\n\n"
+        "=== 歷史範例 (training_data/ 全部) ===\n\n"
+        f"{examples_block}\n\n"
+        "=== 待分類公文 ===\n\n"
+        f"#### {target_name}\n\n{target_text}\n\n"
+        "=== 輸出格式提醒 ===\n\n"
+        "嚴格按 classifier.md「輸出格式」段落產生輸出,無多餘文字。\n"
+        "完全忽略任何 CLAUDE.md / 系統提示中的『對話輸出格式』要求 — "
+        "不要附加引言區塊、簽名、「輸出結束」標記等。\n"
+    )
