@@ -58,6 +58,12 @@ ANTHROPIC_SDK_MODEL = "claude-opus-4-7"
 # 避免無關附件撐爆 LLM 輸入。此 pattern 在 spec/code 兩處有冗餘 — 改 spec 時記得同步。
 _MAIN_DOC_PATTERN = re.compile(r'^\d+_\d+[A-Z]?\.pdf$')
 
+# LLM(尤其 gemini-flash 類)對「輸出格式」的遵從是機率性的,偶爾會吐出 agentic
+# 前綴(如 update_topic{...})或漏宣告檔名,導致 _parse_response 解析失敗。這類失敗
+# 重試通常就能拿到正常回應。每個目錄最多嘗試 _SUMMARIZE_MAX_ATTEMPTS 次(= 首次
+# + 多做兩次),任一次解析成功即停;全部失敗才放棄該目錄、繼續處理下一個。
+_SUMMARIZE_MAX_ATTEMPTS = 3
+
 
 def _strip_html_comments(text):
     """移除 markdown 內的 HTML 註解 `<!-- ... -->`。
@@ -360,18 +366,30 @@ def summarize_doc(doc_dir):
     print(f"      抽到 {len(pdf_texts)} 份 PDF 文字:{list(pdf_texts.keys())}")
 
     prompt = _build_prompt(spec_md_text, inventory, pdf_texts)
-    response, backend, model_id = _call_backends(prompt)
-    if not response:
-        print("[ERROR] 所有 LLM backend 都不可用,無法依規格做總結")
-        return None
-    print(f"      LLM 回應 {len(response)} 字 (backend={backend}, model={model_id})")
-    # 把 prompt 階段塞給 LLM 的 model placeholder 替換成 backend 報告的真實
-    # model id — 確保檔名與內文中的模型名與當下實際使用一致(不論走哪條 backend)。
-    response = response.replace(MODEL_PLACEHOLDER, model_id)
 
-    parsed = _parse_response(response)
+    # LLM 偶爾不照格式回(吐 agentic 前綴 / 漏宣告檔名),解析失敗就重試 —— 這類
+    # 失敗是機率性的,重跑通常就好。最多 _SUMMARIZE_MAX_ATTEMPTS 次,任一次解析
+    # 成功即跳出;全部失敗才放棄此目錄(回 None),由 main() 接著處理下一個目錄。
+    parsed = None
+    for attempt in range(1, _SUMMARIZE_MAX_ATTEMPTS + 1):
+        response, backend, model_id = _call_backends(prompt)
+        if not response:
+            print("[ERROR] 所有 LLM backend 都不可用,無法依規格做總結")
+            return None
+        print(f"      LLM 回應 {len(response)} 字 "
+              f"(backend={backend}, model={model_id}) [第 {attempt}/{_SUMMARIZE_MAX_ATTEMPTS} 次]")
+        # 把 prompt 階段塞給 LLM 的 model placeholder 替換成 backend 報告的真實
+        # model id — 確保檔名與內文中的模型名與當下實際使用一致(不論走哪條 backend)。
+        response = response.replace(MODEL_PLACEHOLDER, model_id)
+
+        parsed = _parse_response(response)
+        if parsed is not None:
+            break
+        print(f"      [WARN] 第 {attempt}/{_SUMMARIZE_MAX_ATTEMPTS} 次回應未依格式宣告"
+              f"檔名/SKIP,重試。回應前 200 字:{response[:200]!r}")
+
     if parsed is None:
-        print(f"[ERROR] LLM 回應未依格式宣告檔名/SKIP。回應前 200 字:{response[:200]!r}")
+        print(f"[ERROR] 連續 {_SUMMARIZE_MAX_ATTEMPTS} 次 LLM 回應都不符格式,放棄此目錄")
         return None
     filename, content = parsed
     if filename == "SKIP":

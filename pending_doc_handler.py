@@ -785,6 +785,37 @@ def _flatten_subdir(parent_dir, names=_FLATTEN_CANDIDATE_NAMES):
         return False
 
 
+def _delete_zip_with_retry(zip_path, attempts=10, interval=0.5):
+    """刪除 zip 原檔,失敗時重試。
+
+    為何要重試:KdApp(javaw)是常駐本地元件,剛打包完那一瞬間可能仍持有 zip 的
+    檔案 handle。Windows 不允許刪除被其他 process 開啟的檔,os.remove 會丟
+    PermissionError(OSError)。單次刪除輸掉這個 race,就會把 zip 永久遺留在
+    download_dir。這裡重試 attempts 次、每次間隔 interval 秒,等 javaw 釋放
+    handle(condition-based wait)。
+
+    最終仍失敗才印 ERROR(連同檔案是否還在)— 不再像舊版默默吞成一行 WARN。
+    回 True=已刪除/本就不存在;False=重試用盡仍刪不掉。
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            os.remove(zip_path)
+            tail = f"(第 {i + 1} 次嘗試)" if i else ""
+            print(f"      OK:已刪除 zip 原檔 {zip_path}{tail}")
+            return True
+        except FileNotFoundError:
+            print(f"      OK:zip 原檔已不存在,無需刪除 {zip_path}")
+            return True
+        except OSError as e:
+            last_err = e
+            time.sleep(interval)
+    still = os.path.exists(zip_path)
+    print(f"      [ERROR] 重試 {attempts} 次仍無法刪除 zip:"
+          f"{type(last_err).__name__}: {last_err}(檔案仍存在={still})")
+    return False
+
+
 def _download_and_extract(driver):
     """公文閱覽器:點「下載」按鈕、下載到 DOWNLOAD_DIR、若為 zip 解到子目錄。
 
@@ -832,12 +863,9 @@ def _download_and_extract(driver):
         _flatten_subdir(extract_dir)
 
         # 解壓縮成功 → 刪 zip 原檔 (節省空間,解壓後的目錄已是完整內容)。
-        # 解壓失敗保留 zip 供事後檢查。
-        try:
-            os.remove(new_path)
-            print(f"      OK:已刪除 zip 原檔 {new_path}")
-        except OSError as e:
-            print(f"      [WARN] 刪 zip 失敗:{type(e).__name__}: {e}")
+        # 解壓失敗保留 zip 供事後檢查。用重試版刪除:KdApp(javaw)剛打包完可能還
+        # 握著 zip handle,Windows 下會擋刪除,需等它放手(詳見 _delete_zip_with_retry)。
+        _delete_zip_with_retry(new_path)
 
         # 鏈式呼叫 summarize_doc:對解壓出來的公文主檔產出 markdown 總結。
         # summarize_doc 規格寫在 summarize_doc.md (LLM 用、人類維護),程式 runtime
