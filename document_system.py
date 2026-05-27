@@ -1133,11 +1133,9 @@ def circulate_doc(driver):
 
 
 def pending_closeout_doc(driver):
-    """待結案處理流程。第一版只印 TODO。"""
-    _ = driver  # 同 pending_doc
-    print("[pending_closeout_doc] 待結案處理流程開始（尚未實作）")
-    print("[pending_closeout_doc] TODO: 切到內容 frame、讀待結案清單、逐筆結案")
-    return True
+    """待結案處理流程。Delegate 給 document_closure.document_closure。"""
+    from document_closure.document_closure import process_document_closure
+    return process_document_closure(driver)
 
 
 def _standalone_open_chrome_at_edoc():
