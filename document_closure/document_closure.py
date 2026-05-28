@@ -82,45 +82,120 @@ def _copy_summary_from_pending(closure_dir):
     return count
 
 
+# JS 用「公文文號」表頭 column-index 精確定位含 doc_no 的列,並回傳該列的
+# checkbox web element。先前 XPath 版 (`//tr[.//td[contains(...)]]`) 實測抓到
+# 錯的列(可能列文字含其他 doc 號的字串、或 td 內有 nested element 影響 contains
+# 比對),改成 column-index 比對「公文文號」那一欄的值 === doc_no 才命中,最精準。
+# 回 {ok, cb, rowText} 或 {ok: false, reason, diagnostics}。
+_FIND_ROW_CHECKBOX_JS = r"""
+var docNo = arguments[0];
+// 找「公文文號」表頭 column index
+var ths = document.querySelectorAll('th');
+var docNoIdx = -1;
+var docNoTh = null;
+for (var i = 0; i < ths.length; i++) {
+    var t = (ths[i].textContent || '').trim();
+    if (t.indexOf('公文文號') === -1) continue;
+    docNoTh = ths[i];
+    var hr = ths[i].parentElement;
+    for (var j = 0; j < hr.children.length; j++) {
+        if (hr.children[j] === ths[i]) { docNoIdx = j; break; }
+    }
+    break;
+}
+if (docNoIdx === -1 || !docNoTh) {
+    return {ok: false, reason: '找不到「公文文號」表頭'};
+}
+var table = docNoTh.closest('table');
+if (!table) return {ok: false, reason: '找不到 table'};
+var rows = table.querySelectorAll('tbody tr');
+// diagnostic:列出每列的「公文文號」cell 文字,失敗時 print 出來
+var rowSnapshot = [];
+var matched = null;
+var matchedRowText = '';
+for (var k = 0; k < rows.length; k++) {
+    var cells = rows[k].children;
+    if (docNoIdx >= cells.length) continue;
+    var cell = cells[docNoIdx];
+    var txt = (cell.textContent || '').trim();
+    rowSnapshot.push('[' + k + '] 公文文號 cell = ' + JSON.stringify(txt));
+    if (matched === null && txt.indexOf(docNo) !== -1) {
+        matched = rows[k];
+        matchedRowText = txt;
+    }
+}
+if (!matched) {
+    return {ok: false, reason: '找不到含「' + docNo + '」的列',
+            diagnostics: rowSnapshot};
+}
+var cb = matched.querySelector('input[type=checkbox]');
+if (!cb) return {ok: false, reason: '該列無 checkbox',
+                 diagnostics: rowSnapshot};
+return {ok: true, cb: cb, rowText: matchedRowText, allRows: rowSnapshot};
+"""
+
+
 def _check_pending_closeout_row(driver, doc_no, timeout=10):
     """在待結案清單找含 doc_no 的列、勾選該列的 checkbox。
 
     流程:
-    1. _switch_to_frame_with_xpath(reuse from document_system):切到含目標 row 的
-       frame(通常是 dTreeContent),確認該列存在
-    2. 在該 frame 內 XPath 抓該列的 checkbox
-    3. _try_check_checkbox(reuse):iCheck plugin 兼容的勾選策略
+    1. _switch_to_frame_with_xpath:切到含「公文文號」表頭的 frame(dTreeContent)
+    2. _FIND_ROW_CHECKBOX_JS:JS column-index 精確定位列 + 抓 checkbox
+    3. _try_check_checkbox:iCheck-相容的勾選策略
+    4. 讀 JS verify 真的勾起來了(防 iCheck API 報成功但 UI 沒更新)
 
-    回 True = 已勾選;False = 找不到列 / 找不到 checkbox / 勾選失敗。
+    為何用 JS column-index 而非 XPath:先前 XPath `//tr[.//td[contains(...)]]`
+    實測抓到錯的列(可能某 cell 的子元素內容意外含其他 doc 號的子串)。column-index
+    版本明確比對「公文文號」那一欄的值,排除其他欄位干擾。
+
+    回 True = 已勾選並 verify 通過;False = 任一步失敗。
     """
     from document_system import _switch_to_frame_with_xpath, _try_check_checkbox
 
-    # 含 doc_no 文字的列(放寬到 td 內任一元素含此文字)
-    row_xpath = (
-        f"//tr[.//td[contains(normalize-space(), '{doc_no}')] "
-        f"or .//*[contains(normalize-space(), '{doc_no}')]]"
-    )
-    if not _switch_to_frame_with_xpath(driver, row_xpath, f"含「{doc_no}」的列",
+    sentinel_xpath = "//th[contains(normalize-space(), '公文文號')]"
+    if not _switch_to_frame_with_xpath(driver, sentinel_xpath,
+                                        "待結案清單(找「公文文號」表頭)",
                                         timeout=timeout):
-        print(f"[ERROR] 找不到含「{doc_no}」的列,無法勾選")
+        print("[ERROR] 找不到待結案清單 frame")
         return False
 
-    cb_xpath = row_xpath + "//input[@type='checkbox']"
     try:
-        cbs = driver.find_elements(By.XPATH, cb_xpath)
+        result = driver.execute_script(_FIND_ROW_CHECKBOX_JS, doc_no)
     except Exception as e:
-        print(f"[ERROR] 找列 checkbox 例外:{type(e).__name__}: {e}")
+        print(f"[ERROR] JS find row checkbox 例外:{type(e).__name__}: {e}")
         return False
 
-    if not cbs:
-        print(f"[ERROR] 含「{doc_no}」的列內找不到 checkbox")
+    if not result or not result.get('ok'):
+        reason = (result or {}).get('reason', 'unknown')
+        diag = (result or {}).get('diagnostics') or []
+        print(f"[ERROR] JS 找列 checkbox 失敗:{reason}")
+        for line in diag:
+            print(f"        {line}")
         return False
 
-    if _try_check_checkbox(driver, cbs[0]):
-        print(f"      OK:已勾選含「{doc_no}」的列 checkbox")
-        return True
-    print(f"[ERROR] 勾選「{doc_no}」列的 checkbox 失敗")
-    return False
+    cb = result['cb']
+    row_text = result.get('rowText', '')
+    all_rows = result.get('allRows', [])
+    print(f"      OK:JS 定位含「{doc_no}」的列(該列公文文號 cell = 「{row_text}」)")
+    print(f"      [diag] 清單共 {len(all_rows)} 列,各列公文文號:")
+    for line in all_rows:
+        print(f"        {line}")
+
+    if not _try_check_checkbox(driver, cb):
+        print(f"[ERROR] 勾選「{doc_no}」列的 checkbox 失敗(_try_check_checkbox 回 False)")
+        return False
+
+    # Double check:JS 讀該列 checkbox 真的 checked(避免 iCheck API 報成功
+    # 但實際 DOM state 沒更新、或勾到別的 checkbox 的 false positive)
+    try:
+        checked_now = driver.execute_script("return arguments[0].checked;", cb)
+    except Exception:
+        checked_now = None
+    if not checked_now:
+        print(f"[ERROR] 勾選後 cb.checked={checked_now} — 勾選未生效")
+        return False
+    print(f"      OK:cb.checked=True,勾選確認生效")
+    return True
 
 
 # 「存查」按鈕 XPath 候選 — 與 document_system.SIGNOFF_BUTTON_XPATHS 同套路:
@@ -558,14 +633,22 @@ def process_document_closure(driver):
         print("[document_closure] 點「存查」失敗,跳過存查表單流程(歸檔已成功)。")
         return True
 
-    # 驗證存查表單上的公文文號 = 剛剛勾選的 doc_no(防呆:避免系統打開錯的表單)
-    print(f"[document_closure] 等存查表單載入、驗證公文文號 = 「{doc_no}」...")
-    if not _search_keyword_in_all_frames(driver, doc_no, timeout=15):
-        print(f"[ERROR] 存查表單上看不到公文文號「{doc_no}」 — "
-              "可能系統開錯表單。保持視窗不關閉,請手動檢查。")
+    # 驗證表單真的載入了 — 用「確定存檔」(只在存查表單出現的按鈕)當 sentinel,
+    # 不能只用 doc_no(清單頁本就含 doc_no,verify 會偽陽性,先前實測就是中這招)。
+    print("[document_closure] 等存查表單載入(找 sentinel「確定存檔」)...")
+    if not _search_keyword_in_all_frames(driver, "確定存檔", timeout=15):
+        print("[ERROR] 存查表單未載入(找不到「確定存檔」按鈕) — 「存查」點擊可能未生效。"
+              "保持視窗不關閉,請手動檢查。")
         return False
 
-    print(f"[document_closure] ✓ 存查表單公文文號確認 = 「{doc_no}」")
+    # 表單已載入,再驗證表單上的 doc_no 是否 = 剛勾選的 doc_no
+    print(f"[document_closure] 表單已載入,驗證公文文號 = 「{doc_no}」...")
+    if not _search_keyword_in_all_frames(driver, doc_no, timeout=3):
+        print(f"[ERROR] 存查表單上看不到公文文號「{doc_no}」 — "
+              "可能系統開錯表單(勾錯列了)。保持視窗不關閉,請手動檢查。")
+        return False
+
+    print(f"[document_closure] ✓ 存查表單已載入且公文文號確認 = 「{doc_no}」")
 
     # TODO: 依存檔層級/案次號/檔號 等欄位填表 + 點「確定存檔」
     print("[document_closure] TODO: 填存查表單欄位、點「確定存檔」（尚未實作）")
