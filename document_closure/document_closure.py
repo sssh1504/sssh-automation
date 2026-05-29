@@ -643,12 +643,14 @@ def _verify_required_fields_filled(driver, expected_category, timeout=5):
                 continue
             arch = r.get('arch', '')
             case_text = r.get('caseText', '')
-            case_val = r.get('caseVal', '')
             ret = r.get('retention', '')
             last_snapshot = r
-            if (arch == expected_category
-                    and case_val and case_text and case_text != '請選擇'
-                    and ret):
+            # 案次號:顯示文字不能是「請選擇」placeholder、必須有其他文字
+            # (不依賴 select.value — 部分系統 option 未設 value 屬性時 value 可能空)
+            case_ok = bool(case_text) and case_text != '請選擇'
+            # 保存年限:必須含至少一個數字
+            retention_ok = any(c.isdigit() for c in ret)
+            if arch == expected_category and case_ok and retention_ok:
                 print(f"      OK:三必填欄位齊備 — 檔號={arch}, "
                       f"案次號={case_text!r}, 保存年限={ret}")
                 return True
@@ -658,7 +660,8 @@ def _verify_required_fields_filled(driver, expected_category, timeout=5):
             pass
         time.sleep(0.3)
     print(f"[ERROR] 三必填欄位未齊備,最後讀到:{last_snapshot!r}")
-    print(f"        期望:檔號={expected_category!r}, 案次號 != '請選擇', 保存年限 != ''")
+    print(f"        期望:檔號={expected_category!r}、"
+          "案次號 != '請選擇'、保存年限 含至少一個數字")
     return False
 
 
