@@ -661,6 +661,173 @@ def _verify_required_fields_filled(driver, expected_category, timeout=5):
     return False
 
 
+# pinCode input XPath 候選(KdApp localhost:16888/doPostMsg popup)
+_PINCODE_INPUT_XPATHS = [
+    "//input[@id='pinCode']",
+    "//input[@name='pinCode']",
+    "//input[contains(@placeholder, 'pinCode')]",
+    "//input[contains(@placeholder, 'PIN')]",
+    "//input[@type='password']",
+    "//input[@type='text']",  # fallback
+]
+
+# pinCode popup 內「確定」按鈕 XPath 候選
+_PINCODE_CONFIRM_XPATHS = [
+    "//button[normalize-space()='確定']",
+    "//input[@value='確定']",
+    "//*[normalize-space()='確定' and (self::button or @role='button')]",
+    "//a[normalize-space()='確定']",
+    "//*[@value='確定']",
+]
+
+
+def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
+    """處理「確定存檔」後跳出的 pinCode 視窗(URL: localhost:16888/doPostMsg)。
+
+    這是 KdApp 本地元件(http://127.0.0.1:16888)在 Chrome 開的新 window,
+    用於收集自然人憑證 PIN 後完成簽章。本函式:
+    1. 記下當前所有 handles,等新 window 出現(popup_timeout 秒)
+    2. switch 到新 window,驗證 URL 含 localhost/127.0.0.1:16888
+    3. _read_pin from taipeion_login_selenium(讀 id.txt)
+    4. 找 pinCode input → 填 PIN → click 確定
+    5. 等 popup 關閉(close_timeout 秒),切回主 window
+
+    成功 → True;任一步失敗 → False(popup 視窗保留供手動完成)。
+    讀不到 PIN 時切回主 window,讓使用者手動在 popup 填。
+    """
+    from taipeion_login_selenium import _read_pin
+
+    try:
+        original_handle = driver.current_window_handle
+        original_handles = set(driver.window_handles)
+    except Exception as e:
+        print(f"[ERROR] 讀 window_handles 失敗:{type(e).__name__}: {e}")
+        return False
+
+    # 等新 window 出現
+    deadline = time.time() + popup_timeout
+    new_handle = None
+    while time.time() < deadline:
+        try:
+            handles = driver.window_handles
+        except Exception:
+            time.sleep(0.3)
+            continue
+        diff = set(handles) - original_handles
+        if diff:
+            new_handle = next(iter(diff))
+            break
+        time.sleep(0.3)
+    if not new_handle:
+        print(f"[ERROR] {popup_timeout}s 內沒有偵測到 pinCode 視窗")
+        return False
+
+    try:
+        driver.switch_to.window(new_handle)
+        time.sleep(0.5)
+        cur_url = driver.current_url
+        print(f"      OK:切到 pinCode 視窗 URL={cur_url}")
+    except Exception as e:
+        print(f"[ERROR] 切到 pinCode 視窗失敗:{type(e).__name__}: {e}")
+        return False
+
+    if "16888" not in cur_url:
+        print(f"      [WARN] 視窗 URL 不像 pinCode popup,繼續嘗試:{cur_url}")
+
+    pin = _read_pin()
+    if not pin:
+        print("[ERROR] 讀不到 PIN(id.txt 不存在/空),pinCode 視窗保留供手動填寫")
+        try:
+            driver.switch_to.window(original_handle)
+        except Exception:
+            pass
+        return False
+
+    # 找 pinCode input
+    pincode_input = None
+    input_deadline = time.time() + 5
+    while time.time() < input_deadline and not pincode_input:
+        for xp in _PINCODE_INPUT_XPATHS:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        pincode_input = el
+                        print(f"      OK:找到 pinCode input(XPath: {xp})")
+                        break
+                except Exception:
+                    continue
+            if pincode_input:
+                break
+        if not pincode_input:
+            time.sleep(0.3)
+
+    if not pincode_input:
+        print("[ERROR] 找不到 pinCode input")
+        return False
+
+    try:
+        pincode_input.clear()
+        pincode_input.send_keys(pin)
+        print("      OK:已填入 PIN")
+    except Exception as e:
+        print(f"[ERROR] 填 PIN 失敗:{type(e).__name__}: {e}")
+        return False
+
+    # 點「確定」
+    clicked = False
+    for xp in _PINCODE_CONFIRM_XPATHS:
+        try:
+            els = driver.find_elements(By.XPATH, xp)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                if not el.is_displayed():
+                    continue
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'}); "
+                    "arguments[0].click();", el)
+                print(f"      OK:點到 pinCode「確定」(XPath: {xp})")
+                clicked = True
+                break
+            except Exception:
+                continue
+        if clicked:
+            break
+    if not clicked:
+        print("[ERROR] 找不到 pinCode 視窗「確定」按鈕")
+        return False
+
+    # 等 popup 關閉
+    close_deadline = time.time() + close_timeout
+    popup_closed = False
+    while time.time() < close_deadline:
+        try:
+            current_handles = driver.window_handles
+        except Exception:
+            current_handles = []
+        if new_handle not in current_handles:
+            popup_closed = True
+            print("      OK:pinCode 視窗已關閉(系統完成簽章)")
+            break
+        time.sleep(0.3)
+    if not popup_closed:
+        print(f"      [WARN] pinCode 視窗 {close_timeout}s 內沒關閉,可能仍處理中")
+
+    # 切回主 window(若還在)
+    try:
+        if original_handle in driver.window_handles:
+            driver.switch_to.window(original_handle)
+            print("      OK:切回主 window")
+    except Exception as e:
+        print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
+    return True
+
+
 def _close_doc_viewer_window(driver):
     """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
 
@@ -1094,15 +1261,26 @@ def process_document_closure(driver):
         print("[ERROR] 必填欄位未齊備,保持視窗,不點「確定存檔」。")
         return False
 
-    # 點「確定存檔」— **重要**:此動作送出表單、把公文真正歸檔,無 admin 介入無法復原
-    print(f"[WARN] 即將點「確定存檔」— 送出後公文 {doc_no} 會被歸檔到檔號 {category}")
-    print(f"[WARN] 此動作無法自動復原,如要中止請於 deadline 前 Ctrl+C")
+    # 暫存「檔號」(在主流程變數中,跨過 pinCode 視窗階段仍可參照)
+    archived_category = category  # 點 確定存檔 後 form 內容會清掉,先存一份
+    print(f"[document_closure] (暫存) 檔號 = {archived_category},稍後 PIN 完會用於 log")
+
+    # 點「確定存檔」— **重要**:此動作會跳 pinCode 視窗(KdApp localhost:16888),
+    # 填完 PIN 才真正完成簽章歸檔,送出後無 admin 介入無法復原。
+    print(f"[WARN] 即將點「確定存檔」— 送出後公文 {doc_no} 會被歸檔到檔號 {archived_category}")
+    print(f"[WARN] 此動作無法自動復原,如要中止請於 pinCode 視窗按「取消」")
     print("[document_closure] 點「確定存檔」按鈕...")
     if not _click_confirm_save_button(driver):
         print("[ERROR] 點「確定存檔」失敗,保持視窗供手動處理。")
         return False
 
-    print(f"[document_closure] ✓ 已送出存查表單(公文 {doc_no} 歸檔到檔號 {category})")
+    # 處理 pinCode 視窗(KdApp localhost:16888/doPostMsg popup)
+    print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 id.txt)、按確定...")
+    if not _handle_pincode_popup(driver):
+        print("[ERROR] pinCode 視窗處理失敗,請手動完成。")
+        return False
+
+    print(f"[document_closure] ✓ 已完成存查(公文 {doc_no} 歸檔到檔號 {archived_category})")
     print("[document_closure] 結案存查流程結束。")
     return True
 
