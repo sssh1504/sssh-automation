@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -828,6 +829,117 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     return True
 
 
+def _verify_archive_success_by_listing(driver, doc_no, timeout=20):
+    """確認 doc_no 已從「待結案」清單消失 → 存查成功。
+
+    pinCode 填完 + popup 關閉後,系統會在主視窗刷新待結案清單(成功歸檔的公文
+    應從清單消失,所以 doc_no 字串不該出現在頁面任一處可見內容)。
+
+    流程:每 1s 用 _find_keyword_in_current_frame(會掃 innerText + input.value)
+    在 top + iframe 搜尋 doc_no;找不到即視為成功。timeout 內始終找到 → 印 WARN
+    回 False(可能 系統處理中 / 未成功 — 由呼叫端決定是否續寫標記檔)。
+
+    成功 → True;timeout 仍見 doc_no → False。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        # top-level
+        found = False
+        try:
+            if _find_keyword_in_current_frame(driver, doc_no):
+                found = True
+        except Exception:
+            pass
+        # iframes
+        if not found:
+            try:
+                iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+            except Exception:
+                iframes = []
+            for ifr in iframes:
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                    if _find_keyword_in_current_frame(driver, doc_no):
+                        found = True
+                        break
+                except Exception:
+                    continue
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+        if not found:
+            print(f"      OK:doc_no「{doc_no}」已從清單消失,存查成功")
+            return True
+        time.sleep(1)
+    print(f"      [WARN] {timeout}s 內 doc_no「{doc_no}」仍在頁面,可能存查未成功")
+    return False
+
+
+# 公文主檔名 regex — 同 summarize_doc._MAIN_DOC_PATTERN(数字_数字[A-Z]?)
+_MAIN_DOC_BASENAME_RE = re.compile(r'^(\d+_\d+[A-Z]?)')
+
+
+def _find_main_doc_basename(closure_dir):
+    """從 closure_dir 找公文主檔名(spec:数字_数字[A-Z]?,如 28708231_1150050003)。
+
+    優先順序:
+    1. *內容.txt(命名為「公文主檔名內容.txt」)→ 去掉「內容.txt」後綴
+    2. 主檔 PDF (`數字_數字[A-Z]?.pdf`)→ 去掉「.pdf」後綴
+
+    沒找到回 None。
+    """
+    # 先看 *內容.txt
+    for p in sorted(glob.glob(os.path.join(closure_dir, "*內容.txt"))):
+        m = _MAIN_DOC_BASENAME_RE.match(os.path.basename(p))
+        if m:
+            return m.group(1)
+    # fallback: 主檔 PDF
+    for p in sorted(glob.glob(os.path.join(closure_dir, "*.pdf"))):
+        name = os.path.basename(p)
+        m = re.match(r'^(\d+_\d+[A-Z]?)\.pdf$', name)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _write_archive_marker(closure_dir):
+    """在 closure_dir 寫存查完成標記檔 `<公文主檔名>_<YYYYMMDD>_存查.txt`。
+
+    內容為 ISO 8601 日期時間 + `_存查`(如 `2026-05-30T14:23:45_存查`),便於人類
+    與 grep 都能識別「這份公文是何時完成存查的」。
+
+    成功 → 回檔案路徑;找不到主檔名/寫檔失敗 → None。
+    """
+    if not os.path.isdir(closure_dir):
+        print(f"      [ERROR] closure 目錄不存在:{closure_dir}")
+        return None
+    main_basename = _find_main_doc_basename(closure_dir)
+    if not main_basename:
+        print(f"      [ERROR] {closure_dir} 內找不到公文主檔(*內容.txt 或 數字_數字[A-Z]?.pdf)")
+        return None
+
+    now = datetime.now()
+    date_str = now.strftime("%Y%m%d")
+    iso_str = now.strftime("%Y-%m-%dT%H:%M:%S")
+    fname = f"{main_basename}_{date_str}_存查.txt"
+    out_path = os.path.join(closure_dir, fname)
+    content = f"{iso_str}_存查"
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"      OK:已寫存查標記檔 {fname}(內容: {content!r})")
+        return out_path
+    except OSError as e:
+        print(f"      [ERROR] 寫標記檔失敗:{type(e).__name__}: {e}")
+        return None
+
+
 def _close_doc_viewer_window(driver):
     """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
 
@@ -1279,6 +1391,19 @@ def process_document_closure(driver):
     if not _handle_pincode_popup(driver):
         print("[ERROR] pinCode 視窗處理失敗,請手動完成。")
         return False
+
+    # 確認 doc_no 已從「待結案」清單消失 → 存查成功
+    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失...")
+    if not _verify_archive_success_by_listing(driver, doc_no):
+        print("[WARN] doc_no 仍在頁面,存查可能未成功 — 不寫標記檔,保持視窗供檢查。")
+        return False
+
+    # 在結案目錄寫存查完成標記檔
+    closure_target = os.path.join(CLOSURE_DOWNLOAD_DIR, doc_no)
+    print(f"[document_closure] 在 {closure_target} 寫存查完成標記檔...")
+    marker_path = _write_archive_marker(closure_target)
+    if not marker_path:
+        print("[WARN] 寫標記檔失敗,但存查已成功(歸檔不受影響)")
 
     print(f"[document_closure] ✓ 已完成存查(公文 {doc_no} 歸檔到檔號 {archived_category})")
     print("[document_closure] 結案存查流程結束。")
