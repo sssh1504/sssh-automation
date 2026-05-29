@@ -400,6 +400,138 @@ def _fill_archive_form_category_input(driver, category_num, timeout=10):
     return False
 
 
+# 用 label 文字定位表單欄位的工具 JS — 給後續所有「找 案次號 / 保存年限 / 密等
+# 等 label 旁的 select / input」共用,避免每次都複製貼上 DOM 走訪邏輯。
+_LABEL_LOOKUP_HELPERS_JS = r"""
+function findLabelLeafByText(text) {
+    // 葉子驗證:找含 text 的最小元素(本身文字 <= 20 字、且沒子元素也含 text)
+    var all = document.querySelectorAll('label, span, div, td, th, p, b, strong');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var t = (el.textContent || '').trim();
+        if (t.length > 20 || t.indexOf(text) === -1) continue;
+        var inner = el.querySelectorAll('*');
+        var hasChild = false;
+        for (var j = 0; j < inner.length; j++) {
+            var st = (inner[j].textContent || '').trim();
+            if (st.indexOf(text) !== -1 && st.length <= 20) {
+                hasChild = true; break;
+            }
+        }
+        if (hasChild) continue;
+        return el;
+    }
+    return null;
+}
+function nearestControl(labelEl, selector) {
+    // 由 label 往父層走最多 5 層,找第一個符合 selector 的控制元素
+    if (!labelEl) return null;
+    var node = labelEl.parentElement;
+    for (var d = 0; d < 5 && node; d++) {
+        var c = node.querySelector(selector);
+        if (c) return c;
+        node = node.parentElement;
+    }
+    return null;
+}
+"""
+
+# 選「案次號」+ 讀「保存年限」 JS。
+# 案次號 select 在使用者填好 檔號 後,系統會 dynamically populate options。
+# 我們選 selectedIndex = 1(跳過 index 0 的「請選擇」placeholder)、dispatch change,
+# 系統的 change handler 應該自動填「保存年限」。回傳當下讀到的值。
+_SELECT_CASE_NO_JS = _LABEL_LOOKUP_HELPERS_JS + r"""
+var caseSel = nearestControl(findLabelLeafByText('案次號'), 'select');
+if (!caseSel) return {ok: false, reason: '找不到 案次號 select'};
+if (caseSel.options.length <= 1) {
+    return {ok: false, reason: '案次號 options 未載入 (option count=' +
+            caseSel.options.length + ')'};
+}
+caseSel.selectedIndex = 1;
+caseSel.dispatchEvent(new Event('change', {bubbles: true}));
+var optionText = caseSel.options[1].text;
+
+var retInput = nearestControl(findLabelLeafByText('保存年限'), 'input');
+var retVal = retInput ? (retInput.value || '').trim() : '';
+return {ok: true, optionText: optionText, retention: retVal};
+"""
+
+# 只讀「保存年限」值用的 JS(系統可能 async 填入,主流程 poll 時用)。
+_READ_RETENTION_JS = _LABEL_LOOKUP_HELPERS_JS + r"""
+var retInput = nearestControl(findLabelLeafByText('保存年限'), 'input');
+return retInput ? (retInput.value || '').trim() : '';
+"""
+
+
+def _select_case_no_and_read_retention(driver, timeout=10, retention_poll_s=2.0):
+    """選「案次號」第一個非 placeholder option、確認系統自動填「保存年限」。
+
+    流程:
+    1. 遍歷 top + 所有 iframe 跑 _SELECT_CASE_NO_JS
+    2. 命中後:若回傳的 retention 為空,poll 該 frame 內「保存年限」值最多
+       retention_poll_s 秒(系統可能 async 填)
+    3. 印選到的 option text 與 保存年限 值
+
+    成功 → True (即使 retention 仍空也回 True,讓後續步驟自己決定是否容忍);
+    失敗 → False。
+    """
+    deadline = time.time() + timeout
+    last_reason = None
+    while time.time() < deadline:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        frames_to_try = [None]
+        try:
+            frames_to_try += driver.find_elements(By.XPATH, "//iframe | //frame")
+        except Exception:
+            pass
+        for ifr in frames_to_try:
+            try:
+                if ifr is None:
+                    driver.switch_to.default_content()
+                    frame_label = "top"
+                else:
+                    name = ifr.get_attribute("name") or ifr.get_attribute("id") or "?"
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                    frame_label = f"frame '{name}'"
+                r = driver.execute_script(_SELECT_CASE_NO_JS)
+            except Exception as e:
+                last_reason = f"{type(e).__name__}: {e}"
+                continue
+            if not r or not r.get('ok'):
+                if r:
+                    last_reason = r.get('reason')
+                continue
+            print(f"      OK:{frame_label} 選到「{r.get('optionText')}」")
+            retention = r.get('retention') or ''
+            # 系統可能 async 填入「保存年限」,給點時間 poll
+            if not retention:
+                end = time.time() + retention_poll_s
+                while time.time() < end:
+                    time.sleep(0.1)
+                    try:
+                        retention = (driver.execute_script(_READ_RETENTION_JS) or '').strip()
+                    except Exception:
+                        retention = ''
+                    if retention:
+                        break
+            if retention:
+                print(f"      OK:「保存年限」= {retention}")
+            else:
+                print("      [WARN] 「保存年限」載入後仍為空 — 後續若必填可能會擋")
+            return True
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        time.sleep(0.5)
+    print(f"      [ERROR] 案次號選取失敗(last reason: {last_reason})")
+    return False
+
+
 def _close_doc_viewer_window(driver):
     """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
 
@@ -821,7 +953,13 @@ def process_document_closure(driver):
 
     print(f"[document_closure] ✓ 已填入分類檔號「{category}」")
 
-    # TODO: 後續填欄位(存檔層級/案次號/保存年限/密等 等) + 點「確定存檔」
+    # 點「案次號」dropdown 選唯一非 placeholder 的 option,系統自動填「保存年限」
+    print("[document_closure] 選「案次號」第一個 option,等系統填「保存年限」...")
+    if not _select_case_no_and_read_retention(driver):
+        print("[ERROR] 案次號選取失敗,保持視窗供手動處理。")
+        return False
+
+    # TODO: 後續填欄位(密等 等)+ 點「確定存檔」
     print("[document_closure] TODO: 填其餘必填欄位、點「確定存檔」（尚未實作）")
     print("[document_closure] 結案存查流程結束。")
     return True
