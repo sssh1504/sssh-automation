@@ -532,6 +532,135 @@ def _select_case_no_and_read_retention(driver, timeout=10, retention_poll_s=2.0)
     return False
 
 
+# 「確定存檔」按鈕 XPath 候選 — 同 _ARCHIVE_BUTTON_XPATHS 套路
+_CONFIRM_SAVE_BUTTON_XPATHS = [
+    "//input[@value='確定存檔']",
+    "//*[@value='確定存檔']",
+    "//button[normalize-space()='確定存檔']",
+    "//a[normalize-space()='確定存檔']",
+    "//input[@type='button' and @value='確定存檔']",
+    "//input[@type='submit' and @value='確定存檔']",
+    "//*[normalize-space()='確定存檔' and (self::button or @role='button')]",
+    "//*[normalize-space()='確定存檔']/ancestor::button[1]",
+    "//*[normalize-space()='確定存檔']/ancestor::a[1]",
+]
+
+
+def _click_confirm_save_button(driver, timeout=10):
+    """點存查表單上方的「確定存檔」按鈕。
+
+    **重要**:此按鈕送出表單、把公文真正存查歸檔,無 admin 介入無法復原。
+    呼叫端必須先 verify 必填欄位齊備、確認 doc_no 正確,再呼叫本函式。
+
+    成功 → True;失敗 → False。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for xp in _CONFIRM_SAVE_BUTTON_XPATHS:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'}); "
+                        "arguments[0].click();", el)
+                    print(f"      OK:點到「確定存檔」按鈕(XPath: {xp})")
+                    return True
+                except Exception:
+                    continue
+        time.sleep(0.5)
+    print("[ERROR] 找不到「確定存檔」按鈕(全部 XPath 都失敗)")
+    return False
+
+
+# 一次讀回三必填欄位的 JS
+_READ_REQUIRED_FIELDS_JS = _LABEL_LOOKUP_HELPERS_JS + r"""
+function getArchiveCategoryValue() {
+    // 找 value '0115' input、回它「下一個」input 的 value
+    var inputs = document.querySelectorAll(
+        'input[type=text], input[type=""], input:not([type])');
+    for (var i = 0; i < inputs.length; i++) {
+        if ((inputs[i].value || '').trim() !== '0115') continue;
+        var parent = inputs[i].parentElement;
+        if (parent) {
+            var sib = parent.querySelectorAll(
+                'input[type=text], input[type=""], input:not([type])');
+            for (var j = 0; j < sib.length - 1; j++) {
+                if (sib[j] === inputs[i]) {
+                    return (sib[j+1].value || '').trim();
+                }
+            }
+        }
+        if (i + 1 < inputs.length) return (inputs[i+1].value || '').trim();
+        return '';
+    }
+    return '';
+}
+var arch = getArchiveCategoryValue();
+var caseSel = nearestControl(findLabelLeafByText('案次號'), 'select');
+var caseVal = caseSel ? (caseSel.value || '').trim() : '';
+var caseText = caseSel && caseSel.selectedIndex >= 0
+    ? (caseSel.options[caseSel.selectedIndex].text || '').trim() : '';
+var retInput = nearestControl(findLabelLeafByText('保存年限'), 'input');
+var retVal = retInput ? (retInput.value || '').trim() : '';
+return {arch: arch, caseVal: caseVal, caseText: caseText, retention: retVal};
+"""
+
+
+def _verify_required_fields_filled(driver, expected_category, timeout=5):
+    """確認三必填欄位都有值:檔號(第二格)= expected_category、案次號已選非 placeholder
+    option、保存年限有值。任一未齊備 → return False。
+
+    遍歷 top + iframe,任一 frame 三個都齊備就 True。printf 印 diagnostic 值
+    讓 log 可看到實際讀到啥。
+    """
+    deadline = time.time() + timeout
+    last_snapshot = None
+    while time.time() < deadline:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        frames = [None]
+        try:
+            frames += driver.find_elements(By.XPATH, "//iframe | //frame")
+        except Exception:
+            pass
+        for ifr in frames:
+            try:
+                if ifr is not None:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                r = driver.execute_script(_READ_REQUIRED_FIELDS_JS)
+            except Exception:
+                continue
+            if not r:
+                continue
+            arch = r.get('arch', '')
+            case_text = r.get('caseText', '')
+            case_val = r.get('caseVal', '')
+            ret = r.get('retention', '')
+            last_snapshot = r
+            if (arch == expected_category
+                    and case_val and case_text and case_text != '請選擇'
+                    and ret):
+                print(f"      OK:三必填欄位齊備 — 檔號={arch}, "
+                      f"案次號={case_text!r}, 保存年限={ret}")
+                return True
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        time.sleep(0.3)
+    print(f"[ERROR] 三必填欄位未齊備,最後讀到:{last_snapshot!r}")
+    print(f"        期望:檔號={expected_category!r}, 案次號 != '請選擇', 保存年限 != ''")
+    return False
+
+
 def _close_doc_viewer_window(driver):
     """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
 
@@ -959,8 +1088,21 @@ def process_document_closure(driver):
         print("[ERROR] 案次號選取失敗,保持視窗供手動處理。")
         return False
 
-    # TODO: 後續填欄位(密等 等)+ 點「確定存檔」
-    print("[document_closure] TODO: 填其餘必填欄位、點「確定存檔」（尚未實作）")
+    # 再次確認三必填欄位齊備(防呆:即使前面 step 都報 OK,送出前再實際讀回核對)
+    print("[document_closure] 送出前再次 verify「檔號 / 案次號 / 保存年限」...")
+    if not _verify_required_fields_filled(driver, category):
+        print("[ERROR] 必填欄位未齊備,保持視窗,不點「確定存檔」。")
+        return False
+
+    # 點「確定存檔」— **重要**:此動作送出表單、把公文真正歸檔,無 admin 介入無法復原
+    print(f"[WARN] 即將點「確定存檔」— 送出後公文 {doc_no} 會被歸檔到檔號 {category}")
+    print(f"[WARN] 此動作無法自動復原,如要中止請於 deadline 前 Ctrl+C")
+    print("[document_closure] 點「確定存檔」按鈕...")
+    if not _click_confirm_save_button(driver):
+        print("[ERROR] 點「確定存檔」失敗,保持視窗供手動處理。")
+        return False
+
+    print(f"[document_closure] ✓ 已送出存查表單(公文 {doc_no} 歸檔到檔號 {category})")
     print("[document_closure] 結案存查流程結束。")
     return True
 
