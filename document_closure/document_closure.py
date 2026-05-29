@@ -12,6 +12,7 @@ document_closure.py
 
 import glob
 import os
+import re
 import shutil
 import sys
 import time
@@ -249,6 +250,153 @@ def _click_archive_button(driver, timeout=15):
                     continue
         time.sleep(0.5)
     print("[ERROR] 找不到「存查」按鈕(全部 XPath 都失敗)")
+    return False
+
+
+# #存查分類: 行的 8 位檔號 regex。spec 規範:
+#   #存查分類:<分類文字> <8位數字>
+# 例:`#存查分類:資安 03750402`
+# 為防 LLM 偶有空白/全形冒號變異,放寬冒號接受「:或：」+ 任意空白;
+# 8 位數字必須精確 8 碼(spec 的對應表就是 8 碼:0375040x)。
+_ARCHIVE_CATEGORY_LINE_RE = re.compile(
+    r'#\s*存查分類\s*[:：]\s*\S+\s+(\d{8})'
+)
+# fallback:若 LLM 漏寫分類文字、只放數字
+_ARCHIVE_CATEGORY_FALLBACK_RE = re.compile(
+    r'#\s*存查分類\s*[:：]\s*(\d{8})'
+)
+
+
+def _read_archive_category_from_summary(doc_no):
+    """從 document_download_closure/<doc_no>/*總結.*.md 讀 #存查分類: 的 8 位檔號。
+
+    summarize_doc.md 規格:總結檔最上方一行為 #存查分類:<分類文字> <8位檔號>。
+    本函式讀檔、regex 抓 8 位數字。
+
+    回字串(成功;如 '03750402')或 None(找不到目錄/檔/格式不符)。
+    """
+    src_dir = os.path.join(CLOSURE_DOWNLOAD_DIR, doc_no)
+    if not os.path.isdir(src_dir):
+        print(f"      [ERROR] 找不到結案目錄 {src_dir}")
+        return None
+    summary_files = sorted(glob.glob(os.path.join(src_dir, "*總結.*.md")))
+    if not summary_files:
+        print(f"      [ERROR] {src_dir} 內無 *總結.*.md")
+        return None
+    md_path = summary_files[0]
+    try:
+        text = open(md_path, encoding='utf-8').read()
+    except OSError as e:
+        print(f"      [ERROR] 讀 {md_path} 失敗:{type(e).__name__}: {e}")
+        return None
+    m = _ARCHIVE_CATEGORY_LINE_RE.search(text) or _ARCHIVE_CATEGORY_FALLBACK_RE.search(text)
+    if not m:
+        print(f"      [ERROR] {os.path.basename(md_path)} 內找不到 #存查分類:... <8位數字>")
+        # 印開頭 5 行供除錯
+        for i, line in enumerate(text.splitlines()[:5]):
+            print(f"           line{i+1}: {line!r}")
+        return None
+    cat = m.group(1)
+    print(f"      OK:從 {os.path.basename(md_path)} 讀到 #存查分類 檔號 = {cat}")
+    return cat
+
+
+# 填表 JS:找 value '0115' 的 input(spec 用語為「檔號」第一格)再取它的「下一個」
+# input(同 parent 內第二個 text input)填 category。用 native setter 繞 React/Vue
+# 攔截過的 value setter,並 dispatch input + change 觸發框架的 dirty/validation。
+_FILL_CATEGORY_JS = r"""
+var cat = arguments[0];
+var inputs = document.querySelectorAll(
+    'input[type=text], input[type=""], input:not([type])');
+function setValue(target, val) {
+    var desc = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) {
+        desc.set.call(target, val);
+    } else {
+        target.value = val;
+    }
+    target.dispatchEvent(new Event('input', {bubbles: true}));
+    target.dispatchEvent(new Event('change', {bubbles: true}));
+}
+for (var i = 0; i < inputs.length; i++) {
+    var first = inputs[i];
+    if ((first.value || '').trim() !== '0115') continue;
+    // 嘗試 1:同 parent 內 input 序列的下一個
+    var parent = first.parentElement;
+    if (parent) {
+        var sib = parent.querySelectorAll(
+            'input[type=text], input[type=""], input:not([type])');
+        for (var j = 0; j < sib.length - 1; j++) {
+            if (sib[j] === first) {
+                setValue(sib[j+1], cat);
+                return {ok: true, where: 'parent siblings',
+                        newValue: sib[j+1].value};
+            }
+        }
+    }
+    // 嘗試 2:document.querySelectorAll 序列的下一個
+    if (i + 1 < inputs.length) {
+        setValue(inputs[i+1], cat);
+        return {ok: true, where: 'global next', newValue: inputs[i+1].value};
+    }
+    return {ok: false, reason: '找到 value=0115 的 input 但無 next input'};
+}
+return {ok: false, reason: '找不到 value=0115 的 input'};
+"""
+
+
+def _fill_archive_form_category_input(driver, category_num, timeout=10):
+    """把 8 位 category_num 填到存查表單「檔號」第一格(0115)右側的第二個 input。
+
+    DOM 結構未知,策略:先嘗試 top-level,再遍歷所有 iframe;在每個 frame 內跑
+    _FILL_CATEGORY_JS:找 value '0115' 的 input → 取它的下一個 input → set value
+    + fire input/change。成功即停。
+
+    成功 → True(driver focus 留在成功填到的 frame,後續若有再填的動作可接續);
+    失敗 → False(印 diagnostic)。
+    """
+    deadline = time.time() + timeout
+    last_reason = None
+    while time.time() < deadline:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        try:
+            r = driver.execute_script(_FILL_CATEGORY_JS, category_num)
+            if r and r.get('ok'):
+                print(f"      OK:top-level 填「{category_num}」(策略: {r.get('where')}, "
+                      f"newValue={r.get('newValue')!r})")
+                return True
+            if r:
+                last_reason = r.get('reason')
+        except Exception as e:
+            last_reason = f"JS 例外:{type(e).__name__}: {e}"
+        try:
+            iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+        except Exception:
+            iframes = []
+        for ifr in iframes:
+            try:
+                name = ifr.get_attribute("name") or ifr.get_attribute("id") or "?"
+                driver.switch_to.default_content()
+                driver.switch_to.frame(ifr)
+                r = driver.execute_script(_FILL_CATEGORY_JS, category_num)
+                if r and r.get('ok'):
+                    print(f"      OK:frame '{name}' 填「{category_num}」(策略: "
+                          f"{r.get('where')}, newValue={r.get('newValue')!r})")
+                    return True
+                if r:
+                    last_reason = f"frame '{name}': {r.get('reason')}"
+            except Exception:
+                continue
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        time.sleep(0.5)
+    print(f"      [ERROR] 所有 frame 都填不到「檔號」第二格 input(last reason: {last_reason})")
     return False
 
 
@@ -658,8 +806,23 @@ def process_document_closure(driver):
 
     print(f"[document_closure] ✓ 存查表單已載入且公文文號確認 = 「{doc_no}」")
 
-    # TODO: 依存檔層級/案次號/檔號 等欄位填表 + 點「確定存檔」
-    print("[document_closure] TODO: 填存查表單欄位、點「確定存檔」（尚未實作）")
+    # 從結案目錄總結讀 #存查分類: 的 8 位檔號(由 summarize_doc 依規格產生)
+    print(f"[document_closure] 從結案目錄 *總結.*.md 讀 #存查分類 檔號...")
+    category = _read_archive_category_from_summary(doc_no)
+    if not category:
+        print("[ERROR] 讀不到分類檔號(*總結.*.md 缺檔或格式不符),保持視窗,後續中止。")
+        return False
+
+    # 填到「檔號」第二格(0115 右側那格)
+    print(f"[document_closure] 把檔號「{category}」填到表單 檔號 第二格...")
+    if not _fill_archive_form_category_input(driver, category):
+        print("[ERROR] 填檔號失敗,保持視窗供手動處理。")
+        return False
+
+    print(f"[document_closure] ✓ 已填入分類檔號「{category}」")
+
+    # TODO: 後續填欄位(存檔層級/案次號/保存年限/密等 等) + 點「確定存檔」
+    print("[document_closure] TODO: 填其餘必填欄位、點「確定存檔」（尚未實作）")
     print("[document_closure] 結案存查流程結束。")
     return True
 
