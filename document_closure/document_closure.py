@@ -613,10 +613,12 @@ return {arch: arch, caseVal: caseVal, caseText: caseText, retention: retVal};
 
 
 def _verify_required_fields_filled(driver, expected_category, timeout=5):
-    """確認三必填欄位都有值:檔號(第二格)= expected_category、案次號已選非 placeholder
-    option、保存年限有值。任一未齊備 → return False。
+    """確認必填欄位齊備:檔號(第二格)= expected_category、案次號已選非 placeholder
+    option。任一未齊備 → return False。
 
-    遍歷 top + iframe,任一 frame 三個都齊備就 True。printf 印 diagnostic 值
+    保存年限由系統依案次號自動填入,不在驗證範圍(讀出來只給 log 看)。
+
+    遍歷 top + iframe,任一 frame 都符合就 True。printf 印 diagnostic 值
     讓 log 可看到實際讀到啥。
     """
     deadline = time.time() + timeout
@@ -648,20 +650,18 @@ def _verify_required_fields_filled(driver, expected_category, timeout=5):
             # 案次號:顯示文字不能是「請選擇」placeholder、必須有其他文字
             # (不依賴 select.value — 部分系統 option 未設 value 屬性時 value 可能空)
             case_ok = bool(case_text) and case_text != '請選擇'
-            # 保存年限:必須含至少一個數字
-            retention_ok = any(c.isdigit() for c in ret)
-            if arch == expected_category and case_ok and retention_ok:
-                print(f"      OK:三必填欄位齊備 — 檔號={arch}, "
-                      f"案次號={case_text!r}, 保存年限={ret}")
+            if arch == expected_category and case_ok:
+                # 保存年限 不在驗證範圍,只印出來供 log 參考
+                print(f"      OK:必填欄位齊備 — 檔號={arch}, 案次號={case_text!r}"
+                      f"(保存年限={ret!r},僅供參考、不驗證)")
                 return True
         try:
             driver.switch_to.default_content()
         except Exception:
             pass
         time.sleep(0.3)
-    print(f"[ERROR] 三必填欄位未齊備,最後讀到:{last_snapshot!r}")
-    print(f"        期望:檔號={expected_category!r}、"
-          "案次號 != '請選擇'、保存年限 含至少一個數字")
+    print(f"[ERROR] 必填欄位未齊備,最後讀到:{last_snapshot!r}")
+    print(f"        期望:檔號={expected_category!r}、案次號 != '請選擇'")
     return False
 
 
