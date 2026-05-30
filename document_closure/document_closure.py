@@ -928,10 +928,11 @@ def _find_main_doc_basename(closure_dir):
 
 
 def _write_archive_marker(closure_dir):
-    """在 closure_dir 寫存查完成標記檔 `<公文主檔名>_<YYYYMMDD>_存查.txt`。
+    """在 closure_dir 寫存查完成標記檔 `<公文主檔名>已存查.txt`。
 
-    內容為 ISO 8601 日期時間 + `_存查`(如 `2026-05-30T14:23:45_存查`),便於人類
-    與 grep 都能識別「這份公文是何時完成存查的」。
+    內容為 ISO 8601 日期時間 + `_存查`(如 `2026-05-30T14:23:45_存查`),
+    讓人類與 grep 都能識別「這份公文何時完成存查」。檔名不含日期 —
+    一個公文只會存查一次,固定後綴「已存查」即可。
 
     成功 → 回檔案路徑;找不到主檔名/寫檔失敗 → None。
     """
@@ -943,10 +944,8 @@ def _write_archive_marker(closure_dir):
         print(f"      [ERROR] {closure_dir} 內找不到公文主檔(*內容.txt 或 數字_數字[A-Z]?.pdf)")
         return None
 
-    now = datetime.now()
-    date_str = now.strftime("%Y%m%d")
-    iso_str = now.strftime("%Y-%m-%dT%H:%M:%S")
-    fname = f"{main_basename}_{date_str}_存查.txt"
+    iso_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    fname = f"{main_basename}已存查.txt"
     out_path = os.path.join(closure_dir, fname)
     content = f"{iso_str}_存查"
     try:
