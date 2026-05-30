@@ -810,9 +810,10 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
             pass
         return False
 
-    # 找 pinCode input
+    # 找 pinCode input — timeout 拉長到 15s,popup 從 about:blank 切到實際 form
+    # 可能要幾秒,DOM ready 的時機難精準預測
     pincode_input = None
-    input_deadline = time.time() + 5
+    input_deadline = time.time() + 15
     while time.time() < input_deadline and not pincode_input:
         for xp in _PINCODE_INPUT_XPATHS:
             try:
@@ -1476,15 +1477,20 @@ def process_document_closure(driver):
         return False
 
     # 處理 pinCode 視窗(KdApp localhost:16888/doPostMsg popup)
+    # 自動處理失敗(找不到 input / PIN 填不進去 / 找不到確定按鈕等)→ 程式停止自動
+    # 操作,但**不中止主流程** — 等使用者手動完成後,下一步 verify 仍會抓到
+    # doc_no 從清單消失,順利寫存查標記檔。
     print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 id.txt)、按確定...")
-    if not _handle_pincode_popup(driver):
-        print("[ERROR] pinCode 視窗處理失敗,請手動完成。")
-        return False
+    pin_auto_ok = _handle_pincode_popup(driver)
+    if not pin_auto_ok:
+        print("[WARN] 自動 pinCode 處理未完成 — 若 popup 仍開著,請手動填 PIN + 按確定")
+        print("[WARN] 程式繼續到 verify 階段(timeout 60s),手動完成後會自動寫標記檔")
 
-    # 確認 doc_no 已從「待結案」清單消失 → 存查成功
-    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失...")
-    if not _verify_archive_success_by_listing(driver, doc_no):
-        print("[WARN] doc_no 仍在頁面,存查可能未成功 — 不寫標記檔,保持視窗供檢查。")
+    # 確認 doc_no 已從「待結案」清單可見列消失 → 存查成功
+    # timeout 拉長到 60s(原 20s),給使用者足夠手動處理時間
+    print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失(等候 60s)...")
+    if not _verify_archive_success_by_listing(driver, doc_no, timeout=60):
+        print("[WARN] doc_no 仍在頁面,存查可能未完成 — 不寫標記,保持視窗供檢查。")
         return False
 
     # 在結案目錄寫存查完成標記檔
