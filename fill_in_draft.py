@@ -9,6 +9,8 @@ import pathlib
 import re
 
 import yaml
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
 
 _BASE_DIR = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = _BASE_DIR / "fill_in_draft.yaml"
@@ -60,25 +62,70 @@ def _lookup(marks, rules, default):
     return default.get("辦理文字", ""), default.get("動作", "none")
 
 
-def _fill_text(driver, text):
-    """在公文閱覽器分頁定位辦理文字輸入框並填入 text。回 True/False。
+# 公文閱覽器 ExtJS 元素選擇器(2026-05-31 實機 dump 鎖定):
+#   - 「我的意見」textarea:textarea.x-input-el.x-form-field — 同層有兩個,
+#     一個 visible(我的意見,~268x150),一個 hidden(0x0 模板)。取 visible 的。
+#   - 動作鈕(決行/陳會/退回/清稿/變更流程):div.x-button 內含
+#     span.x-button-label 文字命中。ExtJS 用 div 模擬 button,點 div 即可。
+#   - id 不能寫死(每次載入 ext-button-XX/ext-element-XX 編號會變)。
+_TEXTAREA_CSS = "textarea.x-input-el.x-form-field"
+_BUTTON_BY_LABEL_XPATH = (
+    "//div[contains(concat(' ', normalize-space(@class), ' '), ' x-button ')]"
+    "[.//span[contains(@class,'x-button-label') and normalize-space(.)='{label}']]"
+)
 
-    真實選擇器於 Task 4 實機探查後填入;在那之前回 False。
-    """
-    print("[fill_in_draft] _fill_text 尚未接上真實選擇器 (Task 4)")
-    return False
+
+def _find_visible_textarea(driver):
+    """找「我的意見」textarea:同 css 有 visible + hidden 兩個,取第一個 visible 的。"""
+    for ta in driver.find_elements(By.CSS_SELECTOR, _TEXTAREA_CSS):
+        try:
+            if ta.is_displayed() and ta.size["width"] > 0 and ta.size["height"] > 0:
+                return ta
+        except Exception:
+            continue
+    return None
+
+
+def _fill_text(driver, text):
+    """在公文閱覽器「我的意見」textarea 填入 text,並讀回驗證。回 True/False。"""
+    try:
+        # 確保在主 frame(dump 確認 textarea 在主 frame,不在 iframe 內)
+        driver.switch_to.default_content()
+        ta = WebDriverWait(driver, 15).until(lambda d: _find_visible_textarea(d))
+        ta.click()
+        ta.clear()
+        ta.send_keys(text)
+        actual = driver.execute_script("return arguments[0].value;", ta) or ""
+        if actual != text:
+            print(f"[fill_in_draft] _fill_text 寫入後驗證失敗:期望={text!r},實際={actual!r}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[fill_in_draft] _fill_text 失敗:{type(e).__name__}: {e}")
+        return False
 
 
 def _save(driver):
-    """點「儲存」鈕並確認成功。回 True/False。Task 4 填真實作。"""
-    print("[fill_in_draft] _save 尚未接上真實選擇器 (Task 4)")
-    return False
+    """ExtJS 公文閱覽器「我的意見」面板沒有獨立『儲存』鈕 — textarea 寫進去後
+    ExtJS 自動 sync 到 viewmodel,文字會留在框內等下一步動作(陳會/不動作)。
+    本函式留作對齊 spec 流程結構,一律回 True。
+    """
+    return True
 
 
 def _click_chen_hui(driver):
-    """點「陳會」鈕。回 True/False。Task 4 填真實作。"""
-    print("[fill_in_draft] _click_chen_hui 尚未接上真實選擇器 (Task 4)")
-    return False
+    """點「陳會」鈕(div.x-button 內含 span.x-button-label='陳會')。回 True/False。"""
+    try:
+        driver.switch_to.default_content()
+        xp = _BUTTON_BY_LABEL_XPATH.format(label="陳會")
+        btn = WebDriverWait(driver, 15).until(
+            lambda d: next((b for b in d.find_elements(By.XPATH, xp) if b.is_displayed()), False)
+        )
+        btn.click()
+        return True
+    except Exception as e:
+        print(f"[fill_in_draft] _click_chen_hui 失敗:{type(e).__name__}: {e}")
+        return False
 
 
 def _dump_candidates(driver, label="root"):
