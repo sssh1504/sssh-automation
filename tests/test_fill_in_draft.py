@@ -81,3 +81,71 @@ def test_lookup_no_match_falls_back_to_default(tmp_path):
 def test_lookup_empty_marks_falls_back_to_default(tmp_path):
     rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
     assert fill_in_draft._lookup([], rules, default) == ("擬:", "none")
+
+
+def _patch_selenium(monkeypatch, calls, fill_ok=True, save_ok=True, chen_ok=True):
+    monkeypatch.setattr(fill_in_draft, "_fill_text",
+                        lambda driver, text: calls.append(("fill", text)) or fill_ok)
+    monkeypatch.setattr(fill_in_draft, "_save",
+                        lambda driver: calls.append(("save",)) or save_ok)
+    monkeypatch.setattr(fill_in_draft, "_click_chen_hui",
+                        lambda driver: calls.append(("chen_hui",)) or chen_ok)
+
+
+def test_fill_in_draft_action_none_fills_saves_no_action(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類: 研習\n## 不參加\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is True
+    assert calls == [("fill", "不參加文字"), ("save",)]
+
+
+def test_fill_in_draft_action_chen_hui_clicks_after_save(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類: 資安\n## 資安\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is True
+    assert calls == [("fill", "陳會文字"), ("save",), ("chen_hui",)]
+
+
+def test_fill_in_draft_backup_action_is_noop(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類: 設備\n## 汰換\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is True
+    assert calls == [("fill", "汰換文字"), ("save",)]
+
+
+def test_fill_in_draft_no_marks_uses_default_template(tmp_path, monkeypatch):
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is True
+    assert calls == [("fill", "擬:"), ("save",)]
+
+
+def test_fill_in_draft_fill_fails_returns_false_no_save(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類: 資安\n## 資安\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls, fill_ok=False)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is False
+    assert calls == [("fill", "陳會文字")]
+
+
+def test_fill_in_draft_save_fails_returns_false_no_action(tmp_path, monkeypatch):
+    _write_summary(tmp_path, "1_1總結.x.md", "#存查分類: 資安\n## 資安\n")
+    cfg = _write_config(tmp_path)
+    calls = []
+    _patch_selenium(monkeypatch, calls, save_ok=False)
+    ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
+    assert ok is False
+    assert calls == [("fill", "陳會文字"), ("save",)]
