@@ -6,11 +6,18 @@
 """
 
 import pathlib
+import re
 
 import yaml
 
 _BASE_DIR = pathlib.Path(__file__).resolve().parent
 CONFIG_PATH = _BASE_DIR / "fill_in_draft.yaml"
+DOWNLOAD_DIR = _BASE_DIR / "document_download"
+
+# 公文閱覽器分頁的 URL 特徵(實測 2026-05-31):
+#   https://edoc.gov.taipei/tcqb/oa/index.html?app=editor&doSno=<10碼>&...
+_VIEWER_URL_PREFIX = "https://edoc.gov.taipei/tcqb/oa/index.html?app=editor"
+_DOSNO_RE = re.compile(r"[?&]doSno=(\d+)")
 
 
 def _read_marks(extract_dir):
@@ -106,33 +113,97 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
         return False
 
 
-def _dry_run(extract_dir, config_path=CONFIG_PATH):
-    """乾跑:只讀標記+查表,印出「會填什麼/會執行什麼動作」,不做 Selenium。
+def _attach_existing_chrome(debugger_address="127.0.0.1:9222"):
+    """Attach 既有 Chrome session(taipeion_login_selenium 啟動時開的 :9222)。
 
-    用途:給某個既有 extract_dir(已有 *總結*.md),驗證 yaml 規則是否如預期。
-    Selenium 真實操作交由 main.py 主流程跑到 pending_doc_handler 時自然觸發。
+    回 driver 或 None。前提:Chrome 啟動時帶 --remote-debugging-port=9222
+    (已寫進 taipeion_login_selenium.py)。沒開 port 會 attach 失敗,提示重跑 main.py。
     """
-    extract_dir = pathlib.Path(extract_dir)
-    marks = _read_marks(extract_dir)
-    rules, default = _load_rules(config_path)
-    text, action = _lookup(marks, rules, default)
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        opts = Options()
+        opts.add_experimental_option("debuggerAddress", debugger_address)
+        return webdriver.Chrome(options=opts)
+    except Exception as e:
+        print(f"[fill_in_draft] attach 既有 Chrome 失敗:{type(e).__name__}: {e}")
+        print(f"[fill_in_draft] 確認:1) Chrome 正在跑 2) 啟動時帶 "
+              f"--remote-debugging-port=9222(新版 taipeion_login_selenium 已預設加)")
+        print("[fill_in_draft] 修補方式:跑 `python main.py 3` 重登 Chrome,新 session 會帶 port。")
+        return None
+
+
+def _find_viewer_window(driver):
+    """在現有 window_handles 中找公文閱覽器分頁,switch 過去並回 (handle, doSno) 或 (None, None)。
+
+    識別:URL 開頭 `https://edoc.gov.taipei/tcqb/oa/index.html?app=editor` + 含 doSno=。
+    若有多個閱覽器分頁,取第一個。
+    """
+    try:
+        handles = driver.window_handles
+    except Exception as e:
+        print(f"[fill_in_draft] 讀 window_handles 失敗:{type(e).__name__}: {e}")
+        return None, None
+    for h in handles:
+        try:
+            driver.switch_to.window(h)
+            url = driver.current_url or ""
+        except Exception as e:
+            print(f"[fill_in_draft] switch {h} 失敗:{type(e).__name__}: {e}")
+            continue
+        if url.startswith(_VIEWER_URL_PREFIX):
+            m = _DOSNO_RE.search(url)
+            if m:
+                doSno = m.group(1)
+                print(f"[fill_in_draft] 找到公文閱覽器分頁,doSno={doSno},URL={url}")
+                return h, doSno
+            print(f"[fill_in_draft] URL 是閱覽器但找不到 doSno:{url}")
+    print(f"[fill_in_draft] 沒找到公文閱覽器分頁(共 {len(handles)} 個 window)。")
+    return None, None
+
+
+def _resolve_extract_dir(doSno, download_dir=DOWNLOAD_DIR):
+    """以 doSno 在 download_dir 內找對應目錄(尾碼匹配,如 MWAA<doSno>)。"""
+    download_dir = pathlib.Path(download_dir)
+    if not download_dir.is_dir():
+        print(f"[fill_in_draft] 下載目錄不存在:{download_dir}")
+        return None
+    candidates = sorted(d for d in download_dir.iterdir()
+                        if d.is_dir() and d.name.endswith(doSno))
+    if not candidates:
+        print(f"[fill_in_draft] {download_dir} 內沒有以 {doSno} 結尾的目錄。")
+        return None
+    if len(candidates) > 1:
+        print(f"[fill_in_draft] 找到多個尾碼匹配的目錄,取第一個:{[c.name for c in candidates]}")
+    return candidates[0]
+
+
+def _standalone_attach_and_run():
+    """standalone 入口:attach 既有 Chrome → 找閱覽器分頁 → 推 extract_dir → 跑 4-2。
+
+    回 True / False(整體成功與否)。
+    """
+    driver = _attach_existing_chrome()
+    if driver is None:
+        return False
+    handle, doSno = _find_viewer_window(driver)
+    if handle is None:
+        return False
+    extract_dir = _resolve_extract_dir(doSno)
+    if extract_dir is None:
+        return False
     print(f"[fill_in_draft] extract_dir={extract_dir}")
-    print(f"[fill_in_draft] 標記={marks}")
-    print(f"[fill_in_draft] → 動作={action}")
-    print(f"[fill_in_draft] → 辦理文字={text!r}")
-    return text, action
+    return fill_in_draft(driver, extract_dir)
 
 
 if __name__ == "__main__":
-    # standalone:給一個既有 extract_dir(預設 document_download/<doc_no>/),
-    # 跑乾跑模式印出「將填什麼/將執行什麼」。不開 Chrome、不做 Selenium 操作。
-    # 真實 4-2 整合測試請跑 `python main.py`(cascade → pending_doc_handler →
-    # 4-2 自然觸發),或在 Chrome 已停在公文閱覽器分頁時以 driver attach 接續。
+    # standalone:attach 既有 Chrome(:9222)→ 找停在公文閱覽器分頁的 window →
+    # 從 URL 抽 doSno → 推 document_download/<MW+doSno>/ → 跑 fill_in_draft。
+    # 前提:Chrome 已由 main.py 啟動(會自動開 :9222),且 main.py 跑過後 Chrome
+    # 仍停在閱覽器分頁(detach=True 預設留著)。
     import sys
 
-    if len(sys.argv) < 2:
-        print("用法: python fill_in_draft.py <extract_dir>")
-        print("  乾跑某筆已下載+總結的公文,印出 4-2 會填的辦理文字與動作。")
-        print("  例: python fill_in_draft.py document_download\\MWAA1156005008")
-        sys.exit(1)
-    _dry_run(sys.argv[1])
+    from taipeion_login_selenium import _setup_stdout_logging
+    _setup_stdout_logging()
+    ok = _standalone_attach_and_run()
+    sys.exit(0 if ok else 1)

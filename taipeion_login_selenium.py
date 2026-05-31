@@ -364,6 +364,9 @@ def _build_chrome_options():
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--restore-last-session=false")
+    # 開 remote debugging port,讓 fill_in_draft.py(4-2)standalone 能 attach 既有
+    # Chrome session、直接接手停在公文閱覽器分頁的 driver,不必重跑整個 cascade。
+    options.add_argument("--remote-debugging-port=9222")
     # 關閉 Chrome Local Network Access (LNA) + Private Network Access (PNA) 阻擋：
     # edoc.gov.taipei (公開來源) 會 fetch 兩個本地簽章元件：
     #   - https://127.0.0.1:56420/56520/56620 (TCGServiSign by Changingtec)
