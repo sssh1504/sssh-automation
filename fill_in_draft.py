@@ -83,6 +83,11 @@ _BUTTON_BY_LABEL_XPATH = (
     "//div[contains(concat(' ', normalize-space(@class), ' '), ' x-button ')]"
     "[.//span[contains(@class,'x-button-label') and normalize-space(.)='{label}']]"
 )
+# 左上 toolbar 磁碟片儲存鈕:.x-button 內含 .x-button-icon.fa-floppy-o (Font Awesome)。
+_SAVE_BUTTON_XPATH = (
+    "//div[contains(concat(' ', normalize-space(@class), ' '), ' x-button ')]"
+    "[.//span[contains(@class,'fa-floppy-o')]]"
+)
 
 
 def _find_visible_textarea(driver):
@@ -116,11 +121,22 @@ def _fill_text(driver, text):
 
 
 def _save(driver):
-    """ExtJS 公文閱覽器「我的意見」面板沒有獨立『儲存』鈕 — textarea 寫進去後
-    ExtJS 自動 sync 到 viewmodel,文字會留在框內等下一步動作(陳會/不動作)。
-    本函式留作對齊 spec 流程結構,一律回 True。
+    """點左上 toolbar 磁碟片儲存鈕(.x-button 內含 .fa-floppy-o icon)。回 True/False。
+
+    填完辦理文字後一定要按儲存,否則 textarea 內容只在前端 viewmodel,
+    重新整理 / 切分頁就會掉。
     """
-    return True
+    try:
+        driver.switch_to.default_content()
+        btn = WebDriverWait(driver, 15).until(
+            lambda d: next((b for b in d.find_elements(By.XPATH, _SAVE_BUTTON_XPATH)
+                            if b.is_displayed()), False)
+        )
+        btn.click()
+        return True
+    except Exception as e:
+        print(f"[fill_in_draft] _save 失敗:{type(e).__name__}: {e}")
+        return False
 
 
 def _click_chen_hui(driver):
