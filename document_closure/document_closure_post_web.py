@@ -1,0 +1,81 @@
+"""
+document_closure_post_web.py
+結案存查下載後，若總結「承辦文字」含「於官網公告」，把公文發佈到松高校網
+(www.sssh.tp.edu.tw)：以總結的「主旨」為標題、主旨下方的「條列摘要」為內容。
+
+設計見 docs/superpowers/specs/2026-06-03-closure-post-web-design.md。
+
+呼叫方式：
+  1) 結案存查流程中自動串接（document_closure._process_one_pending_closure_doc）：
+       maybe_post_announcement(driver, extract_dir)
+  2) 單獨執行（只對指定的「一個」公文目錄）：
+       C:\\Python314\\python.exe document_closure/document_closure_post_web.py <公文目錄>
+"""
+
+import glob
+import os
+import re
+
+# 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
+ANNOUNCE_KEYWORD = "於官網公告"
+
+# 主旨行：兼容有無 * 前綴、半/全形冒號、冒號前後空白。
+_SUBJECT_RE = re.compile(r'^\*?\s*主旨\s*[:：]\s*(.+)$')
+# 條列行：1. / 1、 / 1.（後接內容，可無空白）。
+_BODY_ITEM_RE = re.compile(r'^\s*\d+\s*[.、]\s*.+$')
+
+
+def _parse_summary_text(text):
+    """解析總結.md 文字，回 {'handling', 'title', 'body'} 或 None。
+
+    - handling（承辦文字）：第一個以 `##` 開頭的行（## 或 ### 皆以 ## 開頭，取最先出現的，
+      即承辦文字那行），去掉開頭所有 # 與前後空白；無此行則為 None。
+    - title（主旨）：第一個 `主旨[:：]` 行冒號後的文字。
+    - body（條列摘要）：主旨行之後、檔尾之前，所有 `數字.`／`數字、` 開頭的條列行，
+      原樣（strip 過）以換行串接。
+
+    主旨或 body 任一缺 → 回 None（寧缺勿發殘缺公告）。
+    """
+    handling = None
+    title = None
+    body_lines = []
+    subject_seen = False
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if handling is None and line.startswith("##"):
+            handling = line.lstrip("#").strip() or None
+            continue
+        if title is None:
+            m = _SUBJECT_RE.match(line)
+            if m:
+                title = m.group(1).strip()
+                subject_seen = True
+                continue
+        if subject_seen and _BODY_ITEM_RE.match(line):
+            body_lines.append(line)
+
+    if title is None or not body_lines:
+        return None
+    return {"handling": handling, "title": title, "body": "\n".join(body_lines)}
+
+
+def _parse_summary(extract_dir):
+    """從 extract_dir 內 *總結.*.md 讀檔並解析。回 dict 或 None。"""
+    summaries = sorted(glob.glob(os.path.join(extract_dir, "*總結.*.md")))
+    if not summaries:
+        return None
+    try:
+        text = open(summaries[0], encoding="utf-8").read()
+    except OSError:
+        return None
+    return _parse_summary_text(text)
+
+
+def _should_post(summary):
+    """承辦文字是否含「於官網公告」→ 該不該發佈到校網。summary 為 None / handling
+    為 None / 不含關鍵字 → False。"""
+    if not summary:
+        return False
+    handling = summary.get("handling")
+    return bool(handling) and ANNOUNCE_KEYWORD in handling
