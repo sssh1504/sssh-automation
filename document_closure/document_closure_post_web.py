@@ -19,9 +19,12 @@ import re
 import time
 from datetime import datetime
 
-# 校網首頁(判登入/登出狀態)與圖書館公告板。
+# 校網首頁(判登入/登出狀態)與發佈板。
+# 發佈板=圖書館的「公告文件」(NetworkCenterAnnoucement):library 本頁的「新增公告」
+# 只在 NSS CMS 編輯模式才有,但 library 的「公告文件」連結就是這個 URL、直接導覽即有
+# 「新增公告」鈕、可自動化(2026-06-06 實機驗證)。
 HOME_URL = "https://www.sssh.tp.edu.tw/nss/p/index"
-ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/library"
+ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/NetworkCenterAnnoucement"
 
 # 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
 ANNOUNCE_KEYWORD = "於官網公告"
@@ -210,7 +213,82 @@ def _open_and_login_sssh(driver):
 
 
 def _submit_announcement(driver, title, body):
-    raise NotImplementedError  # Task 5 實作
+    """到 圖書館(/nss/s/main/p/library) 的圖書館公告模組點「新增公告」,
+    填標題+內容,點「發布」。
+
+    完成(成功或失敗)都會關掉校網分頁、切回 edoc。成功 → True。
+    """
+    from selenium.webdriver.common.by import By
+    try:
+        driver.get(ANNO_URL)
+        time.sleep(2)
+
+        # 輪詢等「新增公告」鈕(圖書館公告模組可能 async 載入),最多 ~10s
+        clicked = False
+        for _ in range(20):
+            clicked = driver.execute_script("""
+                for (const b of document.querySelectorAll('button,a')) {
+                    if ((b.innerText||'').trim() === '新增公告') { b.click(); return true; }
+                } return false;
+            """)
+            if clicked:
+                break
+            time.sleep(0.5)
+        if not clicked:
+            _stop_banner("找不到「新增公告」按鈕(此帳號可能無權限,或圖書館公告模組未載入)")
+            return False
+        time.sleep(2.5)
+
+        # 標題(id 帶隨機後綴,前綴比對)
+        title_el = driver.find_element(By.CSS_SELECTOR, '[id^="ct-title-"]')
+        title_el.clear(); title_el.send_keys(title)
+
+        # 內容:CKEditor 5。優先 instance API setData,fallback innerHTML。
+        set_mode = driver.execute_script("""
+            const root = document.querySelector('.ck-editor__editable.ck-content');
+            if (!root) return 'none';
+            if (root.ckeditorInstance) { root.ckeditorInstance.setData(arguments[0]); return 'api'; }
+            root.focus(); root.innerHTML = arguments[0]; return 'innerHTML';
+        """, _body_to_html(body))
+        if set_mode == 'none':
+            _stop_banner("找不到 CKEditor 內容區(.ck-content)")
+            return False
+        print(f"[post_web] 內容已填入(模式={set_mode})")
+
+        # 發布者(ct-person,required,自動化開表單時為空)→ 從 env.env 讀 sssh_publisher 填入
+        from taipeion_login_selenium import _read_config
+        publisher = _read_config("sssh_publisher")
+        if publisher:
+            person = driver.find_elements(By.CSS_SELECTOR, '[id^="ct-person-"]')
+            if person:
+                person[0].clear(); person[0].send_keys(publisher)
+                print(f"[post_web] 發布者已填:{publisher}")
+
+        print("!" * 60)
+        print(f"[post_web][發佈] 即將對真實校網發佈公告:{title}")
+        print("!" * 60)
+
+        published = driver.execute_script("""
+            for (const b of document.querySelectorAll('button')) {
+                if ((b.innerText||'').trim() === '發布') { b.click(); return true; }
+            } return false;
+        """)
+        if not published:
+            _stop_banner("找不到「發布」按鈕")
+            return False
+        time.sleep(3)
+
+        # 驗證:表單(標題框)消失 = 送出成功;仍在 = 必填欄未過/被擋
+        if driver.find_elements(By.CSS_SELECTOR, '[id^="ct-title-"]'):
+            _stop_banner("發布後表單仍在,可能必填欄未填或被擋", "實機檢查表單必填欄(發布單位/發布者/日期)")
+            return False
+        print(f"[post_web] ✓ 已送出發布:{title}")
+        return True
+    except Exception as e:
+        _stop_banner(f"_submit_announcement 例外:{type(e).__name__}: {e}")
+        return False
+    finally:
+        _close_school_tab(driver)
 
 
 def maybe_post_announcement(driver, extract_dir):
