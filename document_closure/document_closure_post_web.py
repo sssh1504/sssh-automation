@@ -312,11 +312,9 @@ def maybe_post_announcement(driver, extract_dir):
         print(f"[post_web]   標題: {title}")
         print("=" * 60)
         if not _open_and_login_sssh(driver):
-            _stop_banner("校網登入失敗,不發佈")
-            return False
+            return False  # 內層 _open_and_login_sssh 失敗時已印具體 STOP banner
         if not _submit_announcement(driver, title, body):
-            _stop_banner("公告發佈失敗")
-            return False
+            return False  # 內層 _submit_announcement 失敗時已印具體 STOP banner
         _write_posted_marker(extract_dir)
         print(f"[post_web] ✓ 公告已發佈:{title}")
         return True
