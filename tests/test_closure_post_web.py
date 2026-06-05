@@ -123,3 +123,18 @@ def test_parse_summary_missing_file_returns_none(tmp_path):
     d = tmp_path / "empty"
     d.mkdir()
     assert _parse_summary(str(d)) is None
+
+
+from document_closure.document_closure_post_web import _body_to_html
+
+
+def test_body_to_html_one_paragraph_per_line():
+    assert _body_to_html("1. 甲\n2. 乙") == "<p>1. 甲</p><p>2. 乙</p>"
+
+
+def test_body_to_html_skips_blank_lines():
+    assert _body_to_html("1. 甲\n\n2. 乙\n") == "<p>1. 甲</p><p>2. 乙</p>"
+
+
+def test_body_to_html_escapes_html_chars():
+    assert _body_to_html("a < b & c") == "<p>a &lt; b &amp; c</p>"

@@ -13,6 +13,7 @@ document_closure_post_web.py
 """
 
 import glob
+import html
 import os
 import re
 
@@ -79,3 +80,12 @@ def _should_post(summary):
         return False
     handling = summary.get("handling")
     return bool(handling) and ANNOUNCE_KEYWORD in handling
+
+
+def _body_to_html(body):
+    """把條列摘要(每行一條)轉成 CKEditor 可吃的 HTML 段落,逐行一個 <p>。
+
+    跳過空行;對每行做 HTML escape,避免內容含 < & 破版。
+    """
+    lines = [ln for ln in body.split("\n") if ln.strip()]
+    return "".join(f"<p>{html.escape(ln)}</p>" for ln in lines)
