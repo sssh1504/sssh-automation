@@ -11,7 +11,10 @@ import re
 import time
 
 import yaml
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    StaleElementReferenceException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -189,7 +192,10 @@ def _click_chen_hui(driver, timeout=15):
                     continue
                 btn.click()
                 return True
-            except StaleElementReferenceException as e:
+            except (StaleElementReferenceException,
+                    ElementClickInterceptedException) as e:
+                # 儲存後 ExtJS 會蓋一層 x-loading-mask 攔截 click(Intercepted);
+                # 重繪則使舊 ref stale。兩者都重試到 mask 消失 / DOM 穩定即可點到。
                 last_err = e
                 time.sleep(0.2)
         print(f"[fill_in_draft] _click_chen_hui 超時({timeout}s),最後例外:{last_err!r}")

@@ -192,3 +192,45 @@ def test_fill_in_draft_save_fails_returns_false_no_action(tmp_path, monkeypatch)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is False
     assert calls == [("fill", "擬:\n本案為宣導，陳閱後文存查。"), ("save",)]
+
+
+# ── _click_chen_hui:儲存後 loading mask 攔截 click 要重試 ──────────────────
+
+
+def test_click_chen_hui_retries_on_click_intercepted():
+    """儲存後 ExtJS 的 x-loading-mask 會攔截 click(ElementClickInterceptedException);
+    _click_chen_hui 應重試到 mask 消失才成功,而非第一次被攔截就放棄回 False。
+
+    回歸測試:2026-06-12 MWAA1156005980 因 mask 攔截、且 retry loop 只 catch
+    StaleElementReferenceException,導致陳會未送出、公文卡在承辦中。
+    """
+    from selenium.common.exceptions import ElementClickInterceptedException
+
+    class _Btn:
+        def __init__(self, fail_times):
+            self._fail = fail_times
+            self.clicks = 0
+
+        def is_displayed(self):
+            return True
+
+        def click(self):
+            self.clicks += 1
+            if self.clicks <= self._fail:
+                raise ElementClickInterceptedException("masked by x-loading-mask")
+
+    btn = _Btn(fail_times=2)   # 前兩次被 loading mask 攔截,第三次才成功
+
+    class _SwitchTo:
+        def default_content(self):
+            pass
+
+    class _Driver:
+        switch_to = _SwitchTo()
+
+        def find_elements(self, by, xpath):
+            return [btn]
+
+    ok = fill_in_draft._click_chen_hui(_Driver(), timeout=5)
+    assert ok is True
+    assert btn.clicks == 3   # 攔截 2 次 + 成功 1 次 = 確實有重試

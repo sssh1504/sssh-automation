@@ -161,10 +161,21 @@ def test_posted_marker_path_none_when_no_main_doc(tmp_path):
 def test_write_and_detect_posted_marker(tmp_path):
     d, base = _make_doc_dir(tmp_path)
     assert pw._already_posted(str(d)) is False
-    p = pw._write_posted_marker(str(d))
+    p = pw._write_posted_marker(str(d), "測試主旨", "圖書館公告", ["課外活動", "硏習資訊"])
     assert p is not None and (d / f"{base}已公告.txt").is_file()
-    assert (d / f"{base}已公告.txt").read_text(encoding="utf-8").endswith("_已公告")
+    lines = (d / f"{base}已公告.txt").read_text(encoding="utf-8").splitlines()
+    assert lines[0].endswith("_已公告。")
+    assert lines[1] == "主旨:測試主旨"
+    assert lines[2] == "公告於:圖書館公告。同步顯示於:課外活動+硏習資訊。"
     assert pw._already_posted(str(d)) is True
+
+
+def test_write_posted_marker_empty_cats_shows_none(tmp_path):
+    # 沒選任何同步分類 → 「同步顯示於:無。」
+    d, base = _make_doc_dir(tmp_path)
+    pw._write_posted_marker(str(d), "標題", "圖書館公告", [])
+    content = (d / f"{base}已公告.txt").read_text(encoding="utf-8")
+    assert content.splitlines()[2] == "公告於:圖書館公告。同步顯示於:無。"
 
 
 def _doc_dir_with_summary(tmp_path, summary_text, base="12345_678"):
@@ -183,16 +194,25 @@ def test_maybe_post_skips_when_not_triggered(tmp_path, monkeypatch):
 
 
 def test_maybe_post_publishes_when_triggered(tmp_path, monkeypatch):
+    import taipeion_login_selenium
     d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)  # 含「於官網公告」
     rec = {}
-    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: rec.__setitem__("login", True) or True)
+    # 不依賴真實 env.env:固定回傳發布單位
+    monkeypatch.setattr(taipeion_login_selenium, "_read_config",
+                        lambda key: "系管師群組" if key == "sssh_publish_unit" else None)
+    monkeypatch.setattr(pw, "_open_and_login_sssh",
+                        lambda drv: rec.__setitem__("login", True) or True)
+    # _submit_announcement 現回傳 dict(selected_cats / board_name),非 bool
     monkeypatch.setattr(pw, "_submit_announcement",
-                        lambda drv, t, b, *a: rec.update(title=t, body=b) or True)
+                        lambda drv, t, b, *a: rec.update(title=t, body=b)
+                        or {"selected_cats": ["課外活動"], "board_name": "圖書館公告"})
     assert pw.maybe_post_announcement(object(), str(d)) is True
     assert rec["login"] is True
     assert rec["title"].startswith("請貴校加強")
     assert rec["body"].startswith("1. 近期發現")
-    assert (d / f"{base}已公告.txt").is_file()  # 成功後寫標記
+    marker = d / f"{base}已公告.txt"
+    assert marker.is_file()  # 成功後寫標記
+    assert "公告於:圖書館公告。同步顯示於:課外活動。" in marker.read_text(encoding="utf-8")
 
 
 def test_maybe_post_skips_when_already_posted(tmp_path, monkeypatch):
@@ -233,6 +253,18 @@ def test_parse_summary_extracts_category():
 def test_parse_summary_category_none_when_absent():
     text = "##於官網公告\n主旨：標題\n1. 內容。\n"
     assert _parse_summary_text(text)["category"] is None
+
+
+def test_parse_sync_categories_from_quad_hash():
+    # #### 校網同步顯示行 → 以 + 分隔的分類清單(取代舊單值邏輯)
+    text = ("#存查分類:研習 03750401\n##於官網公告\n###陳會\n"
+            "####課外活動+硏習資訊\n主旨：標題\n1. 內容。\n")
+    assert _parse_summary_text(text)["sync_categories"] == ["課外活動", "硏習資訊"]
+    # #### 空白 → 不選
+    text2 = "#存查分類:資安\n##於官網公告\n###陳會\n####\n主旨：標題\n1. 內容。\n"
+    assert _parse_summary_text(text2)["sync_categories"] == []
+    # 完全沒有 #### 行 → []
+    assert _parse_summary_text(NEW_FORMAT)["sync_categories"] == []
 
 
 def test_find_attachments_matches_attch_files(tmp_path):
