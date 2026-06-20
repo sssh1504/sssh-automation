@@ -6,7 +6,7 @@ document_system.py
 1) 從 main.py 串接：click_document_card 回 True 後 main() 直接呼叫
      process_document_system(driver)
 2) 單獨執行（測試用，跳過登入流程）：
-     C:\\Python314\\python.exe document_system.py
+     py document_system.py
    會用同一個 Selenium profile 開 Chrome、直接導航到 edoc 首頁；session 過期就
    提示去跑 main.py 重登。
 
@@ -1012,6 +1012,15 @@ def process_document_system(driver):
     if "edoc.gov.taipei" not in current:
         print(f"[ERROR] 當前 URL 不在 edoc：{current}")
         return False
+
+    # ── 殘留清理 ────────────────────────────────────────────────────────────
+    # 跑流程開頭先清掉上次留下的「空 MW* 殘留目錄」(結案刪承辦中目錄時被檔案總管
+    # 鎖住 handle、只清空沒刪殼;此時 explorer 多半已放手,補刪即可)。
+    try:
+        from pending_doc_handler import _sweep_empty_pending_dirs
+        _sweep_empty_pending_dirs()
+    except Exception as e:
+        print(f"[document_system] 殘留目錄清理略過：{type(e).__name__}: {e}")
 
     # ── 催辦訊息 ────────────────────────────────────────────────────────────
     print("[document_system] 讀「催辦訊息」待辦數...")
