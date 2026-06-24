@@ -15,11 +15,17 @@ summarize_doc.py
 3) 獨立執行(指定單一公文目錄):
      `py summarize_doc.py document_download\\MWAA1156005008`
 
-LLM backend (依序嘗試,任一可用即用):
-- gemini (走使用者既有 Google 訂閱 OAuth,模型用 CLI 預設 = 當期最新最佳)
-- claude -p (走使用者既有 claude.ai 訂閱 OAuth)
-- anthropic SDK + 環境變數 ANTHROPIC_API_KEY
-皆不可用 → 報錯返回 None (無 fallback,因 fallback 邏輯也算規格,違反設計原則)。
+LLM backend (順序由 env.env 的 summarize_llm_order 決定,預設見 DEFAULT_LLM_ORDER;
+依序嘗試,第一個成功的勝出):
+- antigravity : Google Antigravity 的 agy CLI (走 Google 帳號 OAuth、免費)。取代已被
+                Google 於 2026-06-18 停用免費 OAuth 的舊 gemini CLI。agy 在 non-TTY 下
+                會把回應從 stdout 丟掉,故用 pywinpty 把它包進 ConPTY 取回 (見 _run_agy_pty)。
+- aistudio    : Google AI Studio (Gemini) REST API (免裝 SDK,stdlib urllib)。key 依序取自
+                env.env google_ai_studio_api_key / 環境變數 GEMINI_API_KEY /
+                ~/.claude/shared-credentials.md。
+- claude      : claude -p CLI (走使用者既有 claude.ai 訂閱 OAuth)。
+- anthropic   : anthropic SDK,key 取自 env.env anthropic_api_key 或環境變數 ANTHROPIC_API_KEY。
+全部不可用 → 報錯返回 None。
 """
 
 import json
@@ -29,6 +35,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -36,17 +45,35 @@ sys.stdout.reconfigure(encoding='utf-8')
 _BASE_DIR = Path(__file__).parent.resolve()
 SPEC_MD = _BASE_DIR / "summarize_doc.md"
 DEFAULT_DOWNLOAD_DIR = _BASE_DIR / "document_download"
+ENV_FILE = _BASE_DIR / "env.env"
+# 共用帳密集中檔 (機密、僅本機、絕不 commit/log)。aistudio backend 的 Gemini key 預設由此讀。
+SHARED_CRED_FILE = Path(os.path.expanduser("~")) / ".claude" / "shared-credentials.md"
 
 # prompt 階段「模型名」用 placeholder 餵給 LLM,backend 跑完後再用實際模型 ID
 # 替換。這樣不論用哪條 backend、哪個 model 變體(預覽/正式版/context 變體),
 # 輸出檔名都精確反映「當下實際用到的模型」,不會錯標。
 MODEL_PLACEHOLDER = "<<MODEL>>"
 
-# Gemini backend:不釘 model id,讓 gemini CLI 用預設 — Google 會把預設模型保持在
-# 當期最新最佳,寫死反而會卡在過期版本。CLI 在 --output-format json 下會回報
-# 實際被選的模型(可能是 pro / flash / preview),程式以該 ID 作檔名。
-# 若需強制指定,改成具體值如 "gemini-3-pro" 即可,程式會自動加上 -m 旗標。
-GEMINI_MODEL = None
+# 公文總結 LLM backend 預設順序 (env.env summarize_llm_order 未設/無效時用)。
+DEFAULT_LLM_ORDER = ("antigravity", "aistudio", "claude", "anthropic")
+_KNOWN_BACKENDS = set(DEFAULT_LLM_ORDER)
+
+# aistudio (Gemini REST) 未指定 summarize_aistudio_model 時的預設模型
+# (2026-06-24 實測此免費層 key 可用 gemini-2.5-flash)。
+AISTUDIO_DEFAULT_MODEL = "gemini-2.5-flash"
+
+# aistudio 暫時性錯誤重試:Gemini 免費層偶爾回 503(模型過載)/429(限流)等,
+# 屬暫時性,重試多半就過。非這些碼(如 400/403)直接放棄。
+_AISTUDIO_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_AISTUDIO_MAX_TRIES = 3
+
+# antigravity (agy) 無 JSON 輸出、無法回報實際模型 → 未設 summarize_agy_model 時
+# 檔名 (總結.<模型>.md) 用此標籤。
+AGY_DEFAULT_MODEL_LABEL = "antigravity"
+
+# agy 的 prompt 只能走命令列參數 (-p 不吃 stdin),受 Windows ~32767 命令列長度限制;
+# 超過就讓位給下一棒 (aistudio/claude 走 API/stdin 無此限)。實測公文 prompt 僅約 5K。
+_AGY_MAX_PROMPT = 30000
 
 # Anthropic SDK fallback 才會用到此 model id;Claude Code CLI / Gemini CLI 走
 # 訂閱 OAuth 不需指定,以 CLI 預設模型為準。
@@ -63,6 +90,94 @@ _MAIN_DOC_PATTERN = re.compile(r'^\d+_\d+[A-Z]?\.pdf$')
 # 重試通常就能拿到正常回應。每個目錄最多嘗試 _SUMMARIZE_MAX_ATTEMPTS 次(= 首次
 # + 多做兩次),任一次解析成功即停;全部失敗才放棄該目錄、繼續處理下一個。
 _SUMMARIZE_MAX_ATTEMPTS = 3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 設定讀取 / backend 順序 / 金鑰解析 / 終端機跳脫碼清理
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_config(key):
+    """從 env.env 讀 key=value (# 開頭整行為註解、空行略過)。
+    找不到 / 值為空 / 讀檔失敗都回 None。"""
+    if not ENV_FILE.is_file():
+        return None
+    try:
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip() or None
+    except Exception as e:
+        print(f"      [WARN] 讀取 env.env 失敗:{type(e).__name__}: {e}")
+    return None
+
+
+def _parse_order(raw):
+    """把 'antigravity,aistudio,...' 解析成已知 backend 名稱清單 (strip+小寫、濾未知、去重保序)。
+    空字串 / None / 全未知 → 回 []。"""
+    if not raw:
+        return []
+    out = []
+    for tok in raw.split(","):
+        name = tok.strip().lower()
+        if name in _KNOWN_BACKENDS and name not in out:
+            out.append(name)
+    return out
+
+
+def _get_backend_order():
+    """回 backend 嘗試順序;env.env summarize_llm_order 未設/無效時用 DEFAULT_LLM_ORDER。"""
+    order = _parse_order(_read_config("summarize_llm_order"))
+    return order if order else list(DEFAULT_LLM_ORDER)
+
+
+# 終端機跳脫碼:OSC (\x1b]...BEL/ST)、CSI (\x1b[...字母)、charset/keypad (\x1b= 等)。
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_ESC = re.compile(r"\x1b[=>()][0-9A-Za-z]?")
+
+
+def _strip_ansi(text):
+    r"""移除終端機跳脫序列與 \r。agy 走 ConPTY 取回的回應前後會夾終端機控制碼,需清掉。"""
+    text = _ANSI_OSC.sub("", text)
+    text = _ANSI_CSI.sub("", text)
+    text = _ANSI_ESC.sub("", text)
+    return text.replace("\r", "")
+
+
+_GEMINI_KEY_RE = re.compile(r"Gemini API Key.*?Key\*\*[：:]\s*`([^`]+)`", re.DOTALL)
+
+
+def _parse_gemini_key_from_text(text):
+    """從 shared-credentials.md 文字解析 Gemini API key (『…Gemini API Key』段的 **Key**)。
+    找不到回 None。"""
+    m = _GEMINI_KEY_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
+def _read_shared_gemini_key():
+    """讀 ~/.claude/shared-credentials.md 取 Gemini key。讀不到回 None。絕不把 key 寫進 log。"""
+    try:
+        if SHARED_CRED_FILE.is_file():
+            return _parse_gemini_key_from_text(SHARED_CRED_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"      [WARN] 讀 shared-credentials 失敗:{type(e).__name__}: {e}")
+    return None
+
+
+def _resolve_gemini_key():
+    """aistudio 用的 Gemini key:env.env google_ai_studio_api_key → 環境變數 GEMINI_API_KEY
+    → ~/.claude/shared-credentials.md,取第一個有值的。"""
+    return (_read_config("google_ai_studio_api_key")
+            or os.environ.get("GEMINI_API_KEY")
+            or _read_shared_gemini_key())
+
+
+def _resolve_anthropic_key():
+    """anthropic 用的 key:env.env anthropic_api_key → 環境變數 ANTHROPIC_API_KEY。"""
+    return _read_config("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")
 
 
 def _strip_html_comments(text):
@@ -165,64 +280,153 @@ def _build_prompt(spec_md_text, dir_inventory, pdf_texts):
     )
 
 
-def _llm_summarize_gemini_code(prompt_text):
-    """走 Gemini CLI — 用使用者既有的 Google 訂閱 OAuth 認證,不需 API key。
+def _find_agy():
+    r"""定位 agy 執行檔。先看 PATH;找不到就退回 agy 標準安裝位置
+    (環境變數 AGY_EXE 覆寫 → %LOCALAPPDATA%\agy\bin\agy.exe)。都沒有回 None。
 
-    模型策略:不傳 -m,讓 gemini CLI 用預設模型(Google 會把預設保持在當期最新最佳)。
-    若 GEMINI_MODEL 常數有指定值,才加上 -m 旗標固定到該版本。
-
-    --output-format json 讓 CLI 回傳結構化 JSON,可從 stats.models 取得「實際被呼叫
-    的模型 ID」(可能是 gemini-3-pro / gemini-3-flash-preview 等,視 CLI 當下的預設
-    與配額路由而定),作為後續寫入檔名的依據。
-
-    cwd 用 tempdir,避免 gemini CLI 載到 project 的 GEMINI.md / CLAUDE.md 等
-    無關 instructions 干擾回應格式。
-
-    回 (response_text, model_id),失敗回 (None, None)。
+    為何需要退路:agy 安裝時把 bin 加進「使用者永久 PATH(登錄檔)」,但安裝前就已啟動
+    的行程(終端機/VSCode)其 PATH 是舊的、看不到 agy → shutil.which 會失敗。
     """
-    gemini_exe = shutil.which("gemini")
-    if not gemini_exe:
-        return None, None
-    # 用 `-p ""` 強制進入非互動模式;真正的 prompt 從 stdin 餵入(避開 Windows
-    # CreateProcess 32K 命令列長度限制 — 含 PDF 全文的 prompt 很容易破表)。
-    # gemini CLI 行為:stdin 內容 + -p 值串接後送 LLM。
-    cmd = [gemini_exe, "-p", "", "--output-format", "json"]
-    if GEMINI_MODEL:
-        cmd.extend(["-m", GEMINI_MODEL])
-    with tempfile.TemporaryDirectory(prefix="gemini_summary_") as td:
+    exe = shutil.which("agy")
+    if exe:
+        return exe
+    candidates = []
+    override = os.environ.get("AGY_EXE")
+    if override:
+        candidates.append(override)
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(os.path.join(local, "agy", "bin", "agy.exe"))
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def _run_agy_pty(argv, timeout=240):
+    r"""用 pywinpty 把 agy 包進 Windows ConPTY 跑 (解決 agy 在 non-TTY 下吞 stdout 的問題),
+    回原始輸出字串。找不到 agy / 缺 pywinpty / 啟動失敗 / 逾時未正常結束 → 回 None。
+
+    dimensions 給足夠寬度避免長行被 ConPTY 硬斷 (實測長單行即使 cols=200 也不被斷,
+    這裡仍設大值雙保險)。讀到 EOF 或行程結束即停。
+    """
+    agy_exe = _find_agy()
+    if not agy_exe:
+        print(r"      [ERROR] 找不到 agy 執行檔(PATH 與 %LOCALAPPDATA%\agy\bin 都沒有);"
+              "antigravity backend 不可用")
+        return None
+    argv = [agy_exe] + list(argv[1:])  # 用完整路徑取代 argv[0],免受 PATH 影響
+    try:
+        from winpty import PtyProcess
+    except Exception:
+        print("      [ERROR] 缺 pywinpty(py -m pip install pywinpty),antigravity backend 不可用")
+        return None
+    try:
+        proc = PtyProcess.spawn(argv, dimensions=(50, 4000))
+    except Exception as e:
+        print(f"      [ERROR] 啟動 agy ConPTY 失敗:{type(e).__name__}: {e}")
+        return None
+    buf = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            result = subprocess.run(
-                cmd,
-                input=prompt_text,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=240,
-                cwd=td,
-            )
-        except subprocess.TimeoutExpired:
-            print("      [ERROR] gemini 超時(240s)")
+            data = proc.read(65536)
+        except EOFError:
+            break
+        if data:
+            buf.append(data)
+        elif not proc.isalive():
+            break
+        else:
+            time.sleep(0.05)
+    if proc.isalive():
+        print(f"      [ERROR] agy 超時({timeout}s)")
+        try:
+            proc.terminate(force=True)
+        except Exception:
+            pass
+        return None
+    return "".join(buf)
+
+
+def _llm_summarize_antigravity(prompt_text):
+    """Antigravity agy CLI backend — 走 Google 帳號 OAuth、免費,取代已停用的舊 gemini CLI。
+
+    agy 在被 subprocess(non-TTY)呼叫時會把回應從 stdout 丟掉,故透過 _run_agy_pty
+    以 ConPTY 取回,再去掉終端機跳脫碼。agy 無 JSON 輸出 → 無法回報實際模型 ID,
+    model 標籤改用 env.env summarize_agy_model;未設則用 AGY_DEFAULT_MODEL_LABEL。
+
+    prompt 只能走命令列參數 (agy 的 -p 不吃 stdin),過大會撞 Windows 命令列上限 →
+    超過 _AGY_MAX_PROMPT 就回 (None, None) 讓位給下一棒。回 (text, model_label) 或 (None, None)。
+    """
+    if len(prompt_text) > _AGY_MAX_PROMPT:
+        print(f"      [WARN] prompt {len(prompt_text)} 字超過 agy 命令列上限,改用下一棒")
+        return None, None
+    model_cfg = _read_config("summarize_agy_model")
+    argv = ["agy", "-p", prompt_text]
+    if model_cfg:
+        argv += ["--model", model_cfg]
+    raw = _run_agy_pty(argv)
+    if raw is None:
+        return None, None
+    text = _strip_ansi(raw).strip()
+    if not text:
+        print("      [ERROR] agy 回應為空(ConPTY 取不到輸出)")
+        return None, None
+    return text, (model_cfg or AGY_DEFAULT_MODEL_LABEL)
+
+
+def _llm_summarize_aistudio(prompt_text):
+    """Google AI Studio (Gemini) REST backend — 直打 generateContent 端點,免裝 SDK。
+
+    key 依序取自 env.env google_ai_studio_api_key / 環境變數 GEMINI_API_KEY /
+    ~/.claude/shared-credentials.md (見 _resolve_gemini_key)。模型用 env.env
+    summarize_aistudio_model,未設則 AISTUDIO_DEFAULT_MODEL。
+
+    回 (text, model_id);model_id 取 API 回報的 modelVersion (精準反映實際模型)。
+    無 key / HTTP 失敗 / 無文字 → (None, None)。
+    """
+    key = _resolve_gemini_key()
+    if not key:
+        return None, None
+    model = _read_config("summarize_aistudio_model") or AISTUDIO_DEFAULT_MODEL
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    body = json.dumps({"contents": [{"parts": [{"text": prompt_text}]}]}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "x-goog-api-key": key}
+
+    # 暫時性錯誤 (503 過載 / 429 限流 / 連線例外) 重試 + backoff;非暫時性 (400/403…) 直接放棄。
+    data = None
+    for attempt in range(1, _AISTUDIO_MAX_TRIES + 1):
+        try:
+            req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+            with urllib.request.urlopen(req, timeout=240) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in _AISTUDIO_RETRY_STATUSES and attempt < _AISTUDIO_MAX_TRIES:
+                print(f"      [WARN] aistudio HTTP {e.code}(暫時性),第 {attempt}/{_AISTUDIO_MAX_TRIES} 次,"
+                      f"{2 * attempt}s 後重試")
+                time.sleep(2 * attempt)
+                continue
+            print(f"      [ERROR] aistudio HTTP {e.code}")
             return None, None
         except Exception as e:
-            print(f"      [ERROR] subprocess gemini 例外:{type(e).__name__}: {e}")
+            if attempt < _AISTUDIO_MAX_TRIES:
+                print(f"      [WARN] aistudio {type(e).__name__}(第 {attempt}/{_AISTUDIO_MAX_TRIES} 次),"
+                      f"{2 * attempt}s 後重試")
+                time.sleep(2 * attempt)
+                continue
+            print(f"      [ERROR] aistudio 呼叫失敗:{type(e).__name__}: {e}")
             return None, None
-    if result.returncode != 0:
-        snippet = (result.stderr or "").strip()[:300]
-        print(f"      [ERROR] gemini rc={result.returncode},stderr={snippet!r}")
+    if data is None:
         return None, None
-    try:
-        data = json.loads(result.stdout or "")
-    except json.JSONDecodeError as e:
-        print(f"      [ERROR] gemini JSON 解析失敗:{e}")
+    cand = (data.get("candidates") or [{}])[0]
+    parts = ((cand.get("content") or {}).get("parts")) or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        print(f"      [ERROR] aistudio 回應無文字;finishReason={cand.get('finishReason')}")
         return None, None
-    response_text = (data.get("response") or "").strip()
-    models = (data.get("stats") or {}).get("models") or {}
-    model_id = next(iter(models), None) if models else None
-    if not response_text or not model_id:
-        print(f"      [ERROR] gemini JSON 缺 response 或 stats.models;keys={list(data.keys())}")
-        return None, None
-    return response_text, model_id
+    return text, (data.get("modelVersion") or model)
 
 
 def _llm_summarize_claude_code(prompt_text):
@@ -277,19 +481,21 @@ def _llm_summarize_claude_code(prompt_text):
 
 
 def _llm_summarize_anthropic(prompt_text):
-    """fallback backend:anthropic SDK + API key。沒 key 或 SDK 沒裝 → 回 (None, None)。
+    """anthropic SDK backend。key 取自 env.env anthropic_api_key 或環境變數 ANTHROPIC_API_KEY;
+    沒 key 或 SDK 沒裝 → 回 (None, None)。
 
     回 (response_text, model_id);model_id 取自 API response 的 model 欄位
     (反映 API 端實際路由的版本,通常等於請求的 ANTHROPIC_SDK_MODEL)。
     """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    key = _resolve_anthropic_key()
+    if not key:
         return None, None
     try:
         import anthropic
     except ImportError:
         return None, None
     try:
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(api_key=key)
         resp = client.messages.create(
             model=ANTHROPIC_SDK_MODEL,
             max_tokens=2048,
@@ -301,21 +507,31 @@ def _llm_summarize_anthropic(prompt_text):
         return None, None
 
 
+def _backend_fns():
+    """backend 名稱 → 對應函式。每次呼叫重新建表,讓測試能 monkeypatch 各 backend。"""
+    return {
+        "antigravity": _llm_summarize_antigravity,
+        "aistudio": _llm_summarize_aistudio,
+        "claude": _llm_summarize_claude_code,
+        "anthropic": _llm_summarize_anthropic,
+    }
+
+
 def _call_backends(prompt):
-    """依序試各 backend,第一個成功的勝出。
+    """依 env.env summarize_llm_order 設定的順序試各 backend,第一個成功的勝出。
     回 (response_text, backend_name, model_id) 或 (None, None, None)。"""
-    print("      嘗試 backend: gemini_code (subprocess gemini, OAuth)...")
-    s, m = _llm_summarize_gemini_code(prompt)
-    if s:
-        return s, "gemini_code", m
-    print("      gemini_code 不可用,嘗試 backend: claude_code (subprocess claude -p)...")
-    s, m = _llm_summarize_claude_code(prompt)
-    if s:
-        return s, "claude_code", m
-    print("      claude_code 不可用,嘗試 backend: anthropic SDK...")
-    s, m = _llm_summarize_anthropic(prompt)
-    if s:
-        return s, "anthropic", m
+    order = _get_backend_order()
+    fns = _backend_fns()
+    print(f"      backend 順序:{order}")
+    for name in order:
+        fn = fns.get(name)
+        if fn is None:
+            continue
+        print(f"      嘗試 backend: {name}...")
+        s, m = fn(prompt)
+        if s:
+            return s, name, m
+        print(f"      {name} 不可用,換下一棒")
     return None, None, None
 
 
